@@ -1,0 +1,5 @@
+After disassembling the Studio IV Interpreter code and looking at the code triggered a memory of Joe Weisbecker demonstrating his new interpreter, long forgotten by me. The new interpreter is capable of double buffering since the display screen memory address pointer is stored in RAM, not fixed in ROM code, as it was for the Studio II and III interpreters. I believe the size of the display is set from RAM memory also.
+
+Display memory starts at x2000 to x23FF, allowing a maximum screen resolution of 128h x 64w pixels. Double buffering two 64 x 64 displays is possible. There is a four bit color table from x2800 to x2BFF where the low order 4 bits are written with values 0 to 7 in the screen saver mode. This color architecture scheme is similar to the Studio III. There is a page of RAM at location x2700 for the stack and interpreter/game program variables. Based on memory pages read during interpreter execution, there are plug-in game cartridge locations available at x0800 and x1000.
+
+Double standard clock presumably ?

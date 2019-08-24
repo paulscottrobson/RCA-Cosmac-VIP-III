@@ -1,0 +1,144 @@
+// *************************************************************************************************
+//
+//	@E 			2 lsbs as eflag numbers 1..4
+//	@R 			4 lsbs as single hexadecimal digit.
+//	@P 			3 lsbs as single digit (port ID)
+//
+//	@BRANCH 	Code to branch short $T8
+//	@LBRANCH 	Code to long branch to $T16
+//	@FETCH16 	Code to fetch 16 bit address high-low to $T16.
+//
+//	All Cx instructions are one extra cycle. (LBR,LSKP,NOP)
+//
+// *************************************************************************************************
+//											Memory Reference
+// *************************************************************************************************
+
+01-0F 	"LDN R@R"				$D = $read($R[0x@R])
+40-4F 	"LDA R@R"				$D = $read($R[0x@R]);$R[0x@R] = ($R[0x@R]+1) & 0xFFFF
+F0 		"LDX"					$D = $read($R[$X])
+72 		"LDXA"					$D = $read($R[$X]);$R[$X] = ($R[$X]+1) & 0xFFFF
+F8 		"LDI .1"				$D = $fetch()
+50-5F 	"STR R@R"				$write($R[0x@R],$D)
+73 		"STXD"					$write($R[$X],$D);$R[$X] = ($R[$X]-1) & 0xFFFF
+
+// *************************************************************************************************
+//										Register operations
+// *************************************************************************************************
+
+10-1F 	"INC R@R" 				$R[0x@R] = ($R[0x@R]+1) & 0xFFFF
+20-2F 	"DEC R@R" 				$R[0x@R] = ($R[0x@R]-1) & 0xFFFF
+60 		"IRX"					$R[$X] = ($R[$X]+1) & 0xFFFF
+80-8F 	"GLO R@R"				$D = $R[0x@R] & 0xFF
+A0-AF 	"PLO R@R"				$R[0x@R] = ($R[0x@R] & 0xFF00) | $D
+90-9F 	"GHI R@R"				$D = ($R[0x@R] >> 8) & 0xFF
+B0-BF 	"PHI R@R"				$R[0x@R] = ($R[0x@R] & 0x00FF) | ($D << 8)
+
+// *************************************************************************************************
+//										  Logic operations
+// *************************************************************************************************
+
+F1 		"OR"					$D = $D | $read($R[$X])
+F9 		"ORI .1"				$D = $D | $fetch()
+F3 		"XOR"					$D = $D ^ $read($R[$X])
+FB 		"XRI .1"				$D = $D ^ $fetch()
+F2 		"AND"					$D = $D & $read($R[$X])
+FA 		"ANI .1"				$D = $D & $fetch()
+
+F6 		"SHR" 					$DF = $D & 1;$D = ($D >> 1) & 0x7F
+76 		"RSHR"					$T16 = $D | ($DF << 8);$DF = $D & 1;$D = ($T16 >> 1) & 0xFF
+FE 		"SHL"					$DF = ($D >> 7) & 1;$D = ($D << 1) & 0xFF
+7E 		"RSHL"					$T16 = ($D << 1) | $DF;$D = $T16 & 0xFF;$DF = ($T16 >> 8) & 1
+
+// *************************************************************************************************
+//										Arithmetic Operations
+// *************************************************************************************************
+
+F4 		"ADD"					@ADD($D,$read($R[$X]),0)
+FC 		"ADI .1"				@ADD($D,$fetch(),0)
+74 		"ADC"					@ADD($D,$read($R[$X]),$DF)
+7C 		"ADCI .1"				@ADD($D,$fetch(),$DF)
+
+F5 		"SD"					@ADD($D^0xFF,$read($R[$X]),1)
+FD 		"SDI .1"				@ADD($D^0xFF,$fetch(),1)
+75 		"SDB"					@ADD($D^0xFF,$read($R[$X]),$DF)
+7D 		"SDBI .1"				@ADD($D^0xFF,$fetch(),$DF)
+
+F7 		"SM"					@ADD($D,$read($R[$X])^0xFF,1)
+FF 		"SMI .1"				@ADD($D,$fetch()^0xFF,1)
+77 		"SMB"					@ADD($D,$read($R[$X])^0xFF,$DF)
+7F 		"SMBI .1"				@ADD($D,$fetch()^0xFF,$DF)
+
+// *************************************************************************************************
+//								Branch instructions (short branch)
+// *************************************************************************************************
+
+30 		"BR .1"					$T8 = $FETCH();@BRANCH
+
+32 		"BZ .1"					$T8 = $FETCH();if ($D == 0) { @BRANCH; }
+3A 		"BNZ .1"				$T8 = $FETCH();if ($D != 0) { @BRANCH; }
+33 		"BDF .1"				$T8 = $FETCH();if ($DF != 0) { @BRANCH; }
+3B 		"BNF .1"				$T8 = $FETCH();if ($DF == 0) { @BRANCH; }
+31 		"BQ .1"					$T8 = $FETCH();if ($Q != 0) { @BRANCH; }
+39 		"BNQ .1"				$T8 = $FETCH();if ($Q == 0) { @BRANCH; }
+
+34-37 	"B@E .1"				$T8 = $FETCH();if ($eflag@E() != 0) { @BRANCH; }
+3C-3F 	"BN@E .1"				$T8 = $FETCH();if ($eflag@E() == 0) { @BRANCH; }
+
+// *************************************************************************************************
+//								Branch instructions (long branch)
+// *************************************************************************************************
+
+C0 		"LBR .2"				@FETCH16;@LBRANCH
+
+C2 		"LBZ .2"				@FETCH16;if ($D == 0) { @LBRANCH; }
+CA 		"LBNZ .2"				@FETCH16;if ($D != 0) { @LBRANCH; }
+C3 		"LBDF .2"				@FETCH16;if ($DF != 0) { @LBRANCH; }
+CB 		"LBNF .2"				@FETCH16;if ($DF == 0) { @LBRANCH; }
+C1 		"LBQ .2"				@FETCH16;if ($Q != 0) { @LBRANCH; }
+C9 		"LBNQ .2"				@FETCH16;if ($Q == 0) { @LBRANCH; }
+
+// *************************************************************************************************
+//										Skip Instructions
+// *************************************************************************************************
+
+38 		"SKP"					$T8 = $FETCH()
+C8 		"LSKP"					@LSKIP
+
+CE 		"LSZ .2"				if ($D == 0) { @LSKIP; }
+C6 		"LSNZ .2"				if ($D != 0) { @LSKIP; }
+CF 		"LSDF .2"				if ($DF != 0) { @LSKIP; }
+C7 		"LSNF .2"				if ($DF == 0) { @LSKIP; }
+CD 		"LSQ .2"				if ($Q != 0) { @LSKIP; }
+C5 		"LSNQ .2"				if ($Q == 0) { @LSKIP; }
+CC 		"LSIE .2"				if ($IE != 0) { @LSKIP; }
+
+// *************************************************************************************************
+//									Control Instructions
+// *************************************************************************************************
+
+00 		"IDL"					;
+C4 		"NOP"					;
+
+D0-DF 	"SEP R@R"				$P = 0x@R
+E0-EF 	"SEX R@R"				$X = 0x@R
+
+7B 		"SEQ"					$Q = 1;$updateQ(1)
+7A 		"REQ"					$Q = 0;$updateQ(0)
+
+78 		"SAV"					$write($R[$X],$T)
+79 		"MARK"					$T = ($X << 4)|$P;$write($R[2],$T);$X = $P;$R[2] = ($R[2]-1) & 0xFFFF
+
+70 		"RET"					$T8 = $read($R[$X]);$R[$X] = ($R[$X]+1) & 0xFFFF;$X = ($T8 >> 4) & 0xF;$P = $T8 & 0xF;$IE = 1
+71 		"DIS"					$T8 = $read($R[$X]);$R[$X] = ($R[$X]+1) & 0xFFFF;$X = ($T8 >> 4) & 0xF;$P = $T8 & 0xF;$IE = 0
+
+68 		"I68"	 				;
+
+// *************************************************************************************************
+//										Input-Output Byte Transfer
+// *************************************************************************************************
+
+61-67 	"OUT @P" 				$output@P($read($R[$X]));$R[$X] = ($R[$X]+1) & 0xFFFF
+
+69-6F 	"INP @P"				$D = $input@P();$write($R[$X],$D)
+
