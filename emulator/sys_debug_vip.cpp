@@ -31,6 +31,9 @@ static const char *_mnemonics[256] =
 
 static const char *labels[] = { "D","DF","P","X","T","Q","IE","RP","RX","CY","BP", NULL };
 
+static int colours[8] = { 0x000,0xF00,0x00F,0xF0F,0x0F0,0xFF0,0x0FF,0xFFF };
+
+// {BLACK, RED, BLUE, VIOLET, GREEN, YELLOW, AQUA, WHITE};
 void DBGXRender(int *address,int runMode) {
 	int n = 0;
 	char buffer[32];
@@ -83,5 +86,24 @@ void DBGXRender(int *address,int runMode) {
 			}
 		}
 		GFXString(GRID(5,row),buffer,GRIDSIZE,isPC ? DBGC_HIGHLIGHT:DBGC_DATA,-1);	// Print the mnemonic
+	}
+
+	if (runMode != 0) {
+		SDL_Rect rc;
+		rc.w = rc.h = 10;
+		for (int x = 0;x < 16;x++) {
+			for (int y = 0;y < 64;y++) {
+				int fCol = colours[CPUReadMemory(x+y*16+0x2800) & 0x07];
+				int bCol = 0x000;
+				int pixel = CPUReadMemory(x+y*16+0x2000);
+				rc.x = x * rc.w * 8 + (WIN_WIDTH-rc.w * 128) / 2;
+				rc.y = y * rc.h + (WIN_HEIGHT-rc.h * 64) / 2;
+				for (int xi = 0;xi < 8;xi++) {
+					GFXRectangle(&rc,(pixel & 0x80) ? fCol:bCol);
+					pixel = pixel << 1;
+					rc.x += rc.w;
+				}
+			}
+		}
 	}
 }	

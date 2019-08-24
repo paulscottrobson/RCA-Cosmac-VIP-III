@@ -43,29 +43,19 @@ static BYTE8 D,DF,P,X,Q,T,IE,T8;
 static WORD16 R[16],T16;
 
 static BYTE8 ramMemory[RAMSIZE];
-
-static BYTE8 BIOS[512] = 
-#include "vip_rom.h"
-
 static WORD16 CYCLES;
 
 // *******************************************************************************************************************************
 //											Read/Write Inline Functions
 // *******************************************************************************************************************************
 
-static BYTE8 inline __Read(WORD16 addr) {
-	if (addr < RAMSIZE) return ramMemory[addr];
-	if (addr & 0x8000) return BIOS[addr & 0x1FF];
-	return 0xFF;
-}
-
 static void inline __Write(WORD16 addr,BYTE8 data) {
-	if (addr < RAMSIZE) {
-		ramMemory[addr] = data;
+	if (addr > 0x2000) {
+		ramMemory[addr & RAMMASK] = data;
 	}
 }
 
-#define READ(n) 	__Read(n)
+#define READ(n) 	ramMemory[(n) & RAMMASK]
 #define WRITE(n,d) 	__Write(n,d)
 
 // *******************************************************************************************************************************
@@ -80,16 +70,10 @@ static void inline __Write(WORD16 addr,BYTE8 data) {
 
 
 void CPUReset(void) {
-
 	Q = 0;IE = 1; 
 	X = P = R[0] = 0; 
 	DF &= 1;
 	CYCLES = 0;
-
-	R[0] = R[2] = 0x8008;
-	X = P = 2;
-	D = 8;
-
 }
 
 // *******************************************************************************************************************************
@@ -108,7 +92,7 @@ void CPUInterrupt(void) {
 // *******************************************************************************************************************************
 
 static inline BYTE8 CPUFetch(void) {
-	BYTE8 opcode = __Read(R[P]);
+	BYTE8 opcode = ramMemory[R[P] & RAMMASK];
 	R[P] = (R[P]+1) & 0xFFFF;
 	return opcode;
 }
@@ -132,7 +116,7 @@ BYTE8 CPUExecuteInstruction(void) {
 		CPUInterrupt();
 	}
 	CYCLES = CYCLES - CYCLES_PER_FRAME;									// Adjust this frame rate.
-	CYCLES = CYCLES + RENDERING_CYCLES;									// Fix it back for the video generation.
+//	CYCLES = CYCLES + RENDERING_CYCLES;									// Fix it back for the video generation.
 	return NTSC_FRAMES_PER_SECOND;										// Return framMemorye rate.
 }
 
@@ -141,7 +125,7 @@ BYTE8 CPUExecuteInstruction(void) {
 // *******************************************************************************************************************************
 
 WORD16 CPUReadMemory(WORD16 address) {
-	return __Read(address);
+	return ramMemory[address & RAMMASK];
 }
 
 void CPUWriteMemory(WORD16 address,WORD16 data) {

@@ -1,0 +1,2481 @@
+   AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 1 - 24/08/19 19:51:57
+
+
+       1/       0 :                     ; Studio IV Interpreter final by Joe Weisbecker
+       2/       0 :                     
+       3/       0 :                     ; disassembled in Emma 02 from Weisbecker Collection cassette 
+       4/       0 :                     ; tape S.572.21B_Studio_IV_Interpreter_final_1_of_1.wav
+       5/       0 :                     
+       6/       0 :                     ; The Sarnoff Collection, The College of New Jersey
+       7/       0 :                     ; Extracted by Andy Modla 2/22/2018
+       8/       0 :                     ; Comments by Marcel van Tongeren
+       9/       0 :                     
+      10/       0 :                     ; Memory Map:
+      11/       0 :                     ; 0000 - 07FF System ROM 
+      12/       0 :                     ; 0800 - 0FFF Cartridge ROM 1
+      13/       0 :                     ; 1000 - 1FFF Cartridge ROM 2
+      14/       0 :                     ; 2000 - 23FF Display RAM (SW changeable via RAM pointer on 27F2/27F3)
+      15/       0 :                     ; 2400 - 26FF Not used or possibly RAM?
+      16/       0 :                     ; 2700 - 27FF RAM used by System ROM
+      17/       0 :                     ; 2800 - 2BFF Colour RAM, lower 3 or 4 bits used for colour indication
+      18/       0 :                     ; 2C00 - FFFF Not used?
+      19/       0 :                     
+      20/       0 :                     ; I/O Map:
+      21/       0 :                     ; Q: Sound on/off, frequency as defined by tone latch 
+      22/       0 :                     ; EF3: Key pressed on selected port (key pad 1) 
+      23/       0 :                     ; EF4: Key pressed on selected port (key pad 2) 
+      24/       0 :                     ; OUT 1: Tone latch, which sets tone frequency 
+      25/       0 :                     ; OUT 2: Select key / port 
+      26/       0 :                     ; OUT 4&6: bit 0-2 background colour, bit 3 white foreground
+      27/       0 :                     ; OUT 4&6: bit 4-5 enable graphics, bit 6 PAL/NTSC
+      28/       0 :                     ; OUT 5&7: Signal video chip to enable DMA towards the 1802 to fetch display data
+      29/       0 :                     
+      30/       0 :                     ; Register usage
+      31/       0 :                     ; R0 DMA pointer
+      32/       0 :                     ; R1 Interrupt Routine program counter
+      33/       0 :                     ; R2 Stack pointer
+      34/       0 :                     ; R3 interpreter program counter
+      35/       0 :                     ; R4 call routine program counter
+      36/       0 :                     ; R5 pseudo code instruction pointer
+      37/       0 :                     ; R6 Vx pointer
+      38/       0 :                     ; R7 Vy pointer
+      39/       0 :                     ; R8 
+      40/       0 :                     ; R9 Random number
+      41/       0 :                     ; RA
+      42/       0 :                     ; RB Display page pointer
+      43/       0 :                     ; RC
+      44/       0 :                     ; RD
+      45/       0 :                     ; RE I pointer
+      46/       0 :                     ; RF
+      47/       0 :                     ;
+      48/       0 :                     ; Program Variables V0 to VF
+      49/       0 :                     ; 27E0 - 27EF
+      50/       0 :                     ;
+      51/       0 :                     ; Interpreter variables
+      52/       0 :                     ; 2700/2701 Temporary storage for I register
+      53/       0 :                     ; 2702-270B Temporary storage for V0 to V9 via PUSH/POP commands
+      54/       0 :                     ; 270B      Random number after using RND [270B] command
+      55/       0 :                     ;
+      56/       0 :                     ; 27F2/27F3 Display buffer address pointer
+      57/       0 :                     ; 27F4      OUT 4 value
+      58/       0 :                     ; 27F5		Number of vertical lines (0x40, 64)
+      59/       0 :                     ; 27F6/27F7 I Pointer to memory 0000 to 3FFF
+      60/       0 :                     		
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 2 - 24/08/19 19:51:57
+
+
+      61/       0 :                     
+      62/       0 :                     ; CPU Type:
+      63/       0 :                     		CPU 1802
+      64/       0 :                     
+      65/       0 :                     ; Origin set to 00000H, EOF = 007FFH
+      66/       0 :                     		ORG  00000H
+      67/       0 :                     
+      68/       0 :                     ; Studio IV Pseudo code definition
+      69/       0 :                     ; Addr. CODE    Emma 02 code	  Explanation
+      70/       0 :                     ; ===== ====    ============      ===========
+      71/       0 :                     ; 0293: 0aaa    LD I, 0aaa        Load I with address 0000 to 0FFF
+      72/       0 :                     ;       1aaa    LD I, 1aaa        Load I with address 1000 to 1FFF
+      73/       0 :                     ;       2aaa    LD I, 2aaa        Load I with address 2000 to 2FFF
+      74/       0 :                     ;       3aaa    LD I, 3aaa        Load I with address 3000 to 3FFF
+      75/       0 :                     ; 0100:
+      76/       0 :                     ; 010B: 4x0y    LD B, [Vy], Vx	  Convert Vx to 3 digit decimal at [Vy+2700], [Vy+2701], [Vy+2702]
+      77/       0 :                     ;               LD B, Vy, Vx
+      78/       0 :                     ; 013E: 4x1y    OR Vx, Vy         Vx = Vx OR Vy
+      79/       0 :                     ;       4x2y    AND Vx, Vy        Vx = Vx + Vy
+      80/       0 :                     ;       4x3y    XOR Vx, Vy        Vx = Vx XOR Vy
+      81/       0 :                     ;       4x4y    ADD Vx, Vy        Vx = Vx + Vy, VB is carry / not borrow
+      82/       0 :                     ;       4x5y    SUB Vx, Vy        Vx = Vx - Vy, VB is carry / not borrow
+      83/       0 :                     ; 0155: 4x6n    SHL Vx, n         Vx = Vx SHL n times, VB will contains bits shifted 'out of Vx'
+      84/       0 :                     ; 0198: 4x7y    KEYP Vy           Wait for key and return key in Vy
+      85/       0 :                     ;                                 VA contains keypad (0 key pad player 1, 1 keypad player 2)
+      86/       0 :                     ; 								  VC = x << 3
+      87/       0 :                     ;       4x8y    KEYR Vy           Wait for key press/release and return key in Vy
+      88/       0 :                     ;                                 VA contains keypad (0 key pad player 1, 1 keypad player 2)
+      89/       0 :                     ;                                 VC = x << 3
+      90/       0 :                     ; 016D: 4x9n    SHR Vx, n         Vx = Vx SHR n times, VB will contains bits shifted 'out of Vx'
+      91/       0 :                     ; 0128: 4xAy    ADDN Vx, Vy       ADD Nibbles, Vx-n0 = Vx-n0 + Vy-n0 and Vx-n1 = Vx-n1 + Vy-n1
+      92/       0 :                     ;                                 (Vx-n0 is the lower 4 bits of Vx, Vx-n1 the higer 4 bits)
+      93/       0 :                     ; 0183: 4.B.    JP I              Jump to address I
+      94/       0 :                     ;				JP
+      95/       0 :                     ; 018A: 4xCy    SHR Vx, Vy        Vx = (Vx SHR 3) AND 0xF, Vy =(Vy SHR 2) AND 0xF
+      96/       0 :                     ; 0188: 4.D.    STOP              Wait in endless loop
+      97/       0 :                     ; 01E0: 4xEn	DRW I, Vx, n      Draw pattern from [I] on screen position Vx, V(x+1) (128x64 positions),
+      98/       0 :                     ;                                 width 8 pixels; n lines.
+      99/       0 :                     ; 01CA: 4.Fy    KEY Vy            Check if key is pressed, if so return key in Vy and VB=1
+     100/       0 :                     ;                                 (VB=0, no key pressed)
+     101/       0 :                     ;                                 VA contains keypad (0 key pad player 1, 1 keypad player 2)
+     102/       0 :                     ; 0300: 
+     103/       0 :                     ; 0360: 5.0.    SYS I             Call 1802 routine at address I, end routine with SEP R4
+     104/       0 :                     ; 031C: 5x1y    SWITCH Vx, Vy,[I] Switch value [I] and onwards with Vx until Vy
+     105/       0 :                     ;               SWITCH Vx, Vy, I
+     106/       0 :                     ; 0374: 5x2.    DRW I, Vx         Draw patterns from [I] on screen
+     107/       0 :                     ; 								  size: 8*4 (w*h)
+     108/       0 :                     ;								  Repeat horizontal: Vx high nibble
+     109/       0 :                     ;								  Repeat vertical: Vx+1 high nibble
+     110/       0 :                     ; 								  Screen position: Vx, Vx+1 low nibble (16x16 positions)
+     111/       0 :                     ; 032E: 5x3y    JE I, Vx, Vy      IF Vx=Vy THEN jump to I
+     112/       0 :                     ;               JE Vx, Vy
+     113/       0 :                     ; 0337: 5x4y    JU I, Vx, Vy      IF Vx!=Vy THEN jump to I
+     114/       0 :                     ;               JU Vx, Vy
+     115/       0 :                     ; 036C: 5x5y    CLR Vx, Vy    	  Store colour Vy (lowest 4 bit) in colour RAM
+     116/       0 :                     ; 								  size: 8*4 (w*h)
+     117/       0 :                     ;								  Repeat horizontal: Vx high nibble
+     118/       0 :                     ;								  Repeat vertical: Vx+1 high nibble
+     119/       0 :                     ; 								  Screen position: Vx, Vx+1 low nibble (16x16 positions)
+     120/       0 :                     ; 036F: 5x6c    CLR Vx, c         Store colour c in colour RAM
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 3 - 24/08/19 19:51:57
+
+
+     121/       0 :                     ; 								  size: 8*4 (w*h)
+     122/       0 :                     ;								  Repeat horizontal: Vx high nibble
+     123/       0 :                     ;								  Repeat vertical: Vx+1 high nibble
+     124/       0 :                     ; 								  Screen position: Vx, Vx+1 low nibble (16x16 positions)
+     125/       0 :                     ; 0374: 5x7.    DRWR I, Vx        Draw pattern from [I] on screen and repeat the same pattern
+     126/       0 :                     ; 								  size: 8*4 (w*h)
+     127/       0 :                     ;								  Repeat horizontal: Vx high nibble
+     128/       0 :                     ;								  Repeat vertical: Vx+1 high nibble
+     129/       0 :                     ; 								  Screen position: Vx, Vx+1 low nibble (16x16 positions)
+     130/       0 :                     ; 034A: 5.8y    JK I, Vy          IF KEY Vy is pressed THEN jump to I
+     131/       0 :                     ;               JK Vy             VA contains keypad (0 key pad player 1, 1 keypad player 2)
+     132/       0 :                     ; 0354: 5.9y    JNK I, Vy         IF KEY Vy not pressed THEN jump to I   
+     133/       0 :                     ;               JNK Vy            VA contains keypad (0 key pad player 1, 1 keypad player 2)
+     134/       0 :                     ; 033C: 5xAy    JG I, Vx, Vy      IF Vx > Vy THEN jump to I
+     135/       0 :                     ;				JG Vx, Vy
+     136/       0 :                     ; 0345: 5xBy    JS I, Vx, Vy      IF Vx < Vy THEN jump to I
+     137/       0 :                     ;				JS Vx, Vy
+     138/       0 :                     ; 0310: 5xCy    CP Vx, Vy, [I]    copy value Vx until Vy to [I] until [I+y]
+     139/       0 :                     ;               CP Vx, Vy, I
+     140/       0 :                     ; 0316: 5xDy    CP [I], Vx, Vy    copy value [I] until [I+y] to Vx until Vy
+     141/       0 :                     ;               CP I, Vx, Vy
+     142/       0 :                     ; 0326: 5xEy    LD [Vy], Vx       [VyV(y+1)]=Vx
+     143/       0 :                     ; 03F8: 5xFy    LD Vx, [Vy]  	  Vx=[VyV(y+1)]
+     144/       0 :                     ; 0400: 
+     145/       0 :                     ; 046A: 60kk    CALL 10kk		  Call subroutine on 10kk, return with 6B.. (RET)
+     146/       0 :                     ; 0478: 61kk    CALL 11kk		  Call subroutine on 11kk, return with 6B.. (RET) 
+     147/       0 :                     ; 0406: 62kk    ADD I, kk         Add kk to Low byte of I; no carry to high byte is done
+     148/       0 :                     ; 040E: 63kk    LD I, [27kk]      LD I with high byte from [27kk] and low byte from [27kk+1]
+     149/       0 :                     ;       63Ey    LD I, Vy, Vy+1    LD I with high byte from Vy and low byte from Vy+1 
+     150/       0 :                     ; 0419: 64kk    LD [27kk], I      LD I high byte to [27kk] and low byte to [27kk+1]
+     151/       0 :                     ;       64Ey    LD Vy, Vy+1, I    LD Vy with high byte from I and Vy+1 with low byte from I
+     152/       0 :                     ; 0420: 65kk    JP kk             Jump to kk in same page 
+     153/       0 :                     ; 047D: 66kk    CALL 06kk         Call subroutine on 6kk, return with 6B.. (RET)
+     154/       0 :                     ; 0600: 6600	PUSH V0-V9		  PUSH (save) V0 to V9 on 2702-270B
+     155/       0 :                     ;				PUSH
+     156/       0 :                     ; 060A: 660A 	POP V0-V9		  POP (get) V0 to V9 from 2702-270B
+     157/       0 :                     ;				POP
+     158/       0 :                     ; 0612: 6612 	SCR CLS 		  Print 8*4 pattern from 0575-0578 (zeros) on screen with DRWR I, Vx,
+     159/       0 :                     ;                                 address following subroutine call contains:
+     160/       0 :                     ;				CLS				  byte 1: Vx value
+     161/       0 :                     ; 								  byte 2: Vx+1 value
+     162/       0 :                     ; 0626: 6626 	SCR FILL		  Print 8*4 pattern from 05FC-05FF (#ff) on screen with DRWR I, Vx,
+     163/       0 :                     ;                                 address following subroutine call contains:
+     164/       0 :                     ; 								  byte 1: Vx value
+     165/       0 :                     ; 								  byte 2: Vx+1 value
+     166/       0 :                     ; 062C: 662C 	CHAR [I], V0, V1  Print character stored on [I] on screen position horizontal V0, vertical V1
+     167/       0 :                     ;				CHAR [I]
+     168/       0 :                     ; 062E: 662E 	CHAR [V2V3],V0,V1 Print character stored on [V2V3] on screen position horizontal V0, vertical V1
+     169/       0 :                     ;				CHAR [V2V3]		
+     170/       0 :                     ; 0648: 6648 	PRINT			  Print characters on screen, address following subroutine call contains:
+     171/       0 :                     ; 								  byte 1: horizontal position on screen (0 to 128)
+     172/       0 :                     ; 								  byte 2: vertical position on screen (0 to 64)
+     173/       0 :                     ; 								  byte 3 and onwards: character number as on 05nn see 0500-052F table.
+     174/       0 :                     ;								  last byte 0xFF
+     175/       0 :                     ; 0656: 6656 	PRINT [I]		  Print characters on screen, [I] contains:
+     176/       0 :                     ; 				PRINT I           byte 1: horizontal position on screen (0 to 128)
+     177/       0 :                     ; 								  byte 2: vertical position on screen (0 to 64)
+     178/       0 :                     ; 								  byte 3 and onwards: character number as on 05nn see 0500-052F table.
+     179/       0 :                     ;								  last byte 0xFF
+     180/       0 :                     ; 0660: 6660 	PRINT D, 3		  Print decimal value of V9 (3 digits) on screen, address following subroutine
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 4 - 24/08/19 19:51:57
+
+
+     181/       0 :                     ;                                 call contains:
+     182/       0 :                     ; 								  byte 1: horizontal position on screen (0 to 128)
+     183/       0 :                     ; 								  byte 2: vertical position on screen (0 to 64)
+     184/       0 :                     ; 067C: 667C 	PRINT D, 2		  Print decimal value of V9 (2 digits) on screen, address following subroutine
+     185/       0 :                     ;                                 call contains:
+     186/       0 :                     ; 								  byte 1: horizontal position on screen (0 to 128)
+     187/       0 :                     ; 								  byte 2: vertical position on screen (0 to 64)
+     188/       0 :                     ; 0682: 6682 	PRINT D, 1  	  Print decimal value of V9 (1 digit) on screen, address following subroutine
+     189/       0 :                     ;                                 call contains:
+     190/       0 :                     ; 								  byte 1: horizontal position on screen (0 to 128)
+     191/       0 :                     ; 								  byte 2: vertical position on screen (0 to 64)
+     192/       0 :                     ; 0688: 6688 	CLR				  Colour 2 blocks on the screen with CLR Vx, Vy, address following subroutine
+     193/       0 :                     ;                                 call contains:
+     194/       0 :                     ; 								  byte 1/2: Screen position first CLR command (Vx and Vx+1)
+     195/       0 :                     ; 								  byte 3/4: Screen position second CLR command (Vx and Vx+1)
+     196/       0 :                     ; 								  byte 5: Colour first CLR command (Vy)
+     197/       0 :                     ; 								  byte 6: Colour second CLR command (Vy)
+     198/       0 :                     ; 								  If byte 6 highest nible is not 0 then 2 more blocks in following 6 bytes
+     199/       0 :                     ;                                 will be coloured.
+     200/       0 :                     ;								  (Code on 0424-0432 and 04CE-04D1 is part of this routine)
+     201/       0 :                     ; 0690: 6690 	CP [I]			  Copy to [I] from memory after subroutine call, number of bytes stored in V9
+     202/       0 :                     ;								  (Code on 04D4-04EB is part of this routine)
+     203/       0 :                     ; 047D: 67kk    CALL 07kk		  Call subroutine on 7kk, return with 6B.. (RET)
+     204/       0 :                     ; 0700:	6700 	RESET RAM		  Reset 2700-279F to 0
+     205/       0 :                     ; 070B: 670B 	SCR XOR			  XOR Screen memory with 0xFF
+     206/       0 :                     ; 071C: 671C 	KEY SWITCH		  Key switch subroutine
+     207/       0 :                     ; 								  Following bytes are used as input:
+     208/       0 :                     ; 								  byte 1: First key
+     209/       0 :                     ; 								  byte 2: Last key
+     210/       0 :                     ; 								  byte 3/4: return address if no key pressed
+     211/       0 :                     ; 								  following bytes contain jump table for the pressed keys, first two byte key 0,
+     212/       0 :                     ;                                 next 2 key 1 etc.
+     213/       0 :                     ; 0754: 6754 	ADD [V0V1],[V2V3] Add decimal values [V0V1] and [V2V3] store result on [V0V1]
+     214/       0 :                     ;				ADD V0V1, V2V3	  Number of digits stored in V9.
+     215/       0 :                     ;								  LSD is on V0V1 and V2V3, following digit is on one address lower
+     216/       0 :                     ; 								  Each address (byte) only contains one decimal digit
+     217/       0 :                     ; 075A: 675A 	SUB [V0V1],[V2V3] Subtract decimal values [V2V3] from [V0V1] store result on [V0V1]
+     218/       0 :                     ;				SUB V0V1, V2V3    Number of digits stored in V9.
+     219/       0 :                     ;								  LSD is on V0V1 and V2V3, following on one address lower
+     220/       0 :                     ; 								  Each address (byte) only contains one decimal digit
+     221/       0 :                     ; 078E: 678E 	ADD I, V9		  I = I + V9
+     222/       0 :                     ; 079C: 679C 	LD I, [I+V9]	  I = [I+V9]
+     223/       0 :                     ; 079E: 679E 	LD I, [I]		  I = [I]
+     224/       0 :                     ; 07AA: 67AA 	KEY WAIT		  Wait for key from either keypad and return key in V9, VA indicates keypad
+     225/       0 :                     ; 07B6: 67B6 	RND [270B], V9	  Store random number between 0 and V9 on [270B]
+     226/       0 :                     ;				RND V9						  
+     227/       0 :                     ; 07BC: 67BC 	RND [270B],V8,V9  Store random number between V8 and V9 on [270B]
+     228/       0 :                     ; 				RND V8, V9
+     229/       0 :                     ; 047D: 68kk    CALL 08kk		  Call subroutine on 8kk, return with 6B.. (RET)  
+     230/       0 :                     ; 0434: 69kk    CALL I, kk        Call subroutine on I, V9=kk, return with 6B.. (RET)
+     231/       0 :                     ; 0449: 6A..    PUSH I            Store value I on stack
+     232/       0 :                     ; 0444: 6B..    RET               Return from subrouting (any CALL)
+     233/       0 :                     ; 0450: 6C..    POP I             Load I from stack
+     234/       0 :                     ; 04A0: 6Dkk    WAIT [I], kk	  WAIT with a value kk, using [I] towards a table on 049h and 048l where hl is
+     235/       0 :                     ;                                 the byte on [I]
+     236/       0 :                     ; 045A: 6E.y    OUT4 Vy        	  OUT 4 with value Vx, 0x27F4 = Vx
+     237/       0 :                     ; 0462: 6Fkk    OUT4 kk           OUT 4 with value kk, 0x27F4 = kk
+     238/       0 :                     ; 01DD: 7xkk    ADD Vx, kk        Vx=Vx+kk
+     239/       0 :                     ; 0289: 8xkk    JZ Vx, kk         Jump if variable Vx is zero to current page with offset kk
+     240/       0 :                     ; 028F: 9xkk    JNZ Vx, kk        Jump if variable Vx is not zero to current page with offset kk
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 5 - 24/08/19 19:51:57
+
+
+     241/       0 :                     ; 03EB: Axkk    JE I, Vx, kk      Jump to I if Vx = kk
+     242/       0 :                     ;				JE Vx, kk
+     243/       0 :                     ; 03F1: Bxkk    JNE I, Vx, kk     Jump to I if Vx != kk
+     244/       0 :                     ;				JNE Vx, kk
+     245/       0 :                     ; 0272: Cxkk    RND Vx, kk        Vx = random byte masked by kk
+     246/       0 :                     ; 02D2: Dxkk    LD [27kk], Vx     Load address [27kk] with Vx
+     247/       0 :                     ; 02D7: Exkk    LD Vx, [27kk]	  Load Vx with value on address [27kk]
+     248/       0 :                     ; 029E: Fxkk    LD Vx, kk         Vx = kk
+     249/       0 :                     
+     250/       0 :                     ; Labels:
+     251/       0 :                     
+     252/       0 :                     ; Unused or indirect labels:
+     253/       0 :                     ; S004C
+     254/       0 :                     ; S00F4
+     255/       0 :                     ; S014D
+     256/       0 :                     ; S01D3
+     257/       0 :                     ; S0236
+     258/       0 :                     ; S02A2
+     259/       0 :                     ; S02C9
+     260/       0 :                     ; S0313
+     261/       0 :                     ; S0319
+     262/       0 :                     ; S0323
+     263/       0 :                     ; S035B
+     264/       0 :                     ; S0367
+     265/       0 :                     ; S037A
+     266/       0 :                     ; S03EB
+     267/       0 :                     ; S03F1
+     268/       0 :                     
+     269/       0 :                     ; Register Definitions:
+     270/       0 : =0H                 R0		EQU 0
+     271/       0 : =1H                 R1		EQU 1
+     272/       0 : =2H                 R2		EQU 2
+     273/       0 : =3H                 R3		EQU 3
+     274/       0 : =4H                 R4		EQU 4
+     275/       0 : =5H                 R5		EQU 5
+     276/       0 : =6H                 R6		EQU 6
+     277/       0 : =7H                 R7		EQU 7
+     278/       0 : =8H                 R8		EQU 8
+     279/       0 : =9H                 R9		EQU 9
+     280/       0 : =AH                 RA		EQU 10
+     281/       0 : =BH                 RB		EQU 11
+     282/       0 : =CH                 RC		EQU 12
+     283/       0 : =DH                 RD		EQU 13
+     284/       0 : =EH                 RE		EQU 14
+     285/       0 : =FH                 RF		EQU 15
+     286/       0 :                     
+     287/       0 :                     ; Start code segment
+     288/       0 : 90                  		GHI  R0              ;0000: 90          
+     289/       1 : B4                  		PHI  R4              ;0001: B4          
+     290/       2 : B1                  		PHI  R1              ;0002: B1          
+     291/       3 : F8 16               		LDI  16H             ;0003: F8 16       
+     292/       5 : A4                  		PLO  R4              ;0005: A4          
+     293/       6 : F8 4F               		LDI  4FH             ;0006: F8 4F       
+     294/       8 : A1                  		PLO  R1              ;0008: A1          
+     295/       9 : F8 27               		LDI  27H             ;0009: F8 27       
+     296/       B : B2                  		PHI  R2              ;000B: B2          
+     297/       C : F8 BF               		LDI  0BFH            ;000C: F8 BF       
+     298/       E : A2                  		PLO  R2              ;000E: A2          
+     299/       F : F8 02               		LDI  02H             ;000F: F8 02       
+     300/      11 : B5                  		PHI  R5              ;0011: B5          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 6 - 24/08/19 19:51:57
+
+
+     301/      12 : F8 DC               		LDI  0DCH            ;0012: F8 DC       
+     302/      14 : A5                  		PLO  R5              ;0014: A5          
+     303/      15 : D4                  		SEP  R4              ;0015: D4  
+     304/      16 :                             
+     305/      16 :                     MAIN_OPCODE_LOOP
+     306/      16 : F8 27               		LDI  27H             ;0016: F8 27       
+     307/      18 : B6                  		PHI  R6              ;0018: B6          
+     308/      19 : B7                  		PHI  R7              ;0019: B7          
+     309/      1A : E2                  		SEX  R2              ;001A: E2          
+     310/      1B : F8 F6               		LDI  0F6H            ;001B: F8 F6       
+     311/      1D : A6                  		PLO  R6              ;001D: A6          
+     312/      1E : 46                  		LDA  R6              ;001E: 46          
+     313/      1F : BE                  		PHI  RE              ;001F: BE          
+     314/      20 : 06                  		LDN  R6              ;0020: 06          
+     315/      21 : AE                  		PLO  RE              ;0021: AE          
+     316/      22 : 94                  		GHI  R4              ;0022: 94          
+     317/      23 : BC                  		PHI  RC              ;0023: BC          
+     318/      24 : 45                  		LDA  R5              ;0024: 45          
+     319/      25 : BF                  		PHI  RF              ;0025: BF          
+     320/      26 : F6                  		SHR                  ;0026: F6          
+     321/      27 : F6                  		SHR                  ;0027: F6          
+     322/      28 : F6                  		SHR                  ;0028: F6          
+     323/      29 : F6                  		SHR                  ;0029: F6          
+     324/      2A : F9 D0               		ORI  0D0H            ;002A: F9 D0       
+     325/      2C : AC                  		PLO  RC              ;002C: AC          
+     326/      2D : 9F                  		GHI  RF              ;002D: 9F          
+     327/      2E : FA 0F               		ANI  0FH             ;002E: FA 0F       
+     328/      30 : BF                  		PHI  RF              ;0030: BF          
+     329/      31 : F9 E0               		ORI  0E0H            ;0031: F9 E0       
+     330/      33 : A6                  		PLO  R6              ;0033: A6          
+     331/      34 : 45                  		LDA  R5              ;0034: 45          
+     332/      35 : AF                  		PLO  RF              ;0035: AF          
+     333/      36 : FA 0F               		ANI  0FH             ;0036: FA 0F       
+     334/      38 : F9 E0               		ORI  0E0H            ;0038: F9 E0       
+     335/      3A : A7                  		PLO  R7              ;003A: A7          
+     336/      3B : 4C                  		LDA  RC              ;003B: 4C          
+     337/      3C : B3                  		PHI  R3              ;003C: B3          
+     338/      3D : 8C                  		GLO  RC              ;003D: 8C          
+     339/      3E : FC 0F               		ADI  0FH             ;003E: FC 0F       
+     340/      40 : AC                  		PLO  RC              ;0040: AC          
+     341/      41 : 0C                  		LDN  RC              ;0041: 0C          
+     342/      42 : A3                  		PLO  R3              ;0042: A3          
+     343/      43 : D3                  		SEP  R3              ;0043: D3     
+     344/      44 :                     RET_AFTER_OPCODE
+     345/      44 : 30 16               		BR   MAIN_OPCODE_LOOP;0044: 30 16       
+     346/      46 : 00                  		DB   00H             ;0046: 00
+     347/      47 :                     		
+     348/      47 :                     ; Interrupt routine        
+     349/      47 :                     R0047
+     350/      47 : 7A                  		REQ                  ;0047: 7A          
+     351/      48 :                     R0048
+     352/      48 : F8 F9               		LDI  0F9H            ;0048: F8 F9       
+     353/      4A : A8                  		PLO  R8              ;004A: A8          
+     354/      4B : D8                  		SEP  R8              ;004B: D8          
+     355/      4C :                     S004C
+     356/      4C : E2                  		SEX  R2              ;004C: E2          
+     357/      4D : 42                  		LDA  R2              ;004D: 42  
+     358/      4E : 70                  		RET                  ;004E: 70  	Return from interrupt         
+     359/      4F : C4                  		NOP                  ;004F: C4  	Entry point      
+     360/      50 : 22                  		DEC  R2              ;0050: 22          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 7 - 24/08/19 19:51:57
+
+
+     361/      51 : 78                  		SAV                  ;0051: 78          
+     362/      52 : 22                  		DEC  R2              ;0052: 22          
+     363/      53 : 52                  		STR  R2              ;0053: 52          
+     364/      54 : F8 27               		LDI  27H             ;0054: F8 27       
+     365/      56 : B8                  		PHI  R8              ;0056: B8          
+     366/      57 : F8 F2               		LDI  0F2H            ;0057: F8 F2       
+     367/      59 : A8                  		PLO  R8              ;0059: A8          
+     368/      5A : 48                  		LDA  R8              ;005A: 48          
+     369/      5B : B0                  		PHI  R0              ;005B: B0          
+     370/      5C : E1                  		SEX  R1              ;005C: E1          
+     371/      5D : 48                  		LDA  R8              ;005D: 48          
+     372/      5E : A0                  		PLO  R0              ;005E: A0  	R0 = Screen location in RAM on 27F2/27F3, normal case 0x2000        
+     373/      5F : 48                  		LDA  R8              ;005F: 48          
+     374/      60 : FA 40               		ANI  40H             ;0060: FA 40       
+     375/      62 : BA                  		PHI  RA              ;0062: BA      RA.1 = OUT 4 value (from 27F4) AND 0x40, NTSC = 0 and PAL = 0x40    
+     376/      63 : 48                  		LDA  R8              ;0063: 48          
+     377/      64 : AA                  		PLO  RA              ;0064: AA      RA.0 = Number of vertical lines (0x40, 64) value from 27F5  
+     378/      65 : 19                  		INC  R9              ;0065: 19          
+     379/      66 : E1                  		SEX  R1              ;0066: E1          
+     380/      67 : E1                  		SEX  R1              ;0067: E1          
+     381/      68 : E1                  		SEX  R1              ;0068: E1          
+     382/      69 : E1                  		SEX  R1              ;0069: E1          
+     383/      6A : E1                  		SEX  R1              ;006A: E1          
+     384/      6B : E1                  		SEX  R1              ;006B: E1          
+     385/      6C :                     R006C
+     386/      6C : 80                  		GLO  R0              ;006C: 80    	Start of screen refresh routine   
+     387/      6D : AB                  		PLO  RB              ;006D: AB          
+     388/      6E : 2A                  		DEC  RA              ;006E: 2A          
+     389/      6F : 65                  		OUT  5               ;006F: 65      Enable first burst of DMA outs by Video chip, 0x10 Bytes  
+     390/      70 : 00                  		DB   00H             ;0070: 00
+     391/      71 : 20                  		DEC  R0              ;0071: 20          
+     392/      72 : 8B                  		GLO  RB              ;0072: 8B         
+     393/      73 : A0                  		PLO  R0              ;0073: A0      Reset R0    
+     394/      74 : 9A                  		GHI  RA              ;0074: 9A          
+     395/      75 : 32 7E               		BZ   R007E           ;0075: 32 7E   Jump to 0x7E if NTSC and only do 2 visible lines for every pixel     
+     396/      77 : 65                  		OUT  5               ;0077: 65      Enable second burst (PAL only) of DMA outs by Video chip, 0x10 Bytes   
+     397/      78 : 00                  		DB   00H             ;0078: 00
+     398/      79 : 20                  		DEC  R0              ;0079: 20          
+     399/      7A : 8B                  		GLO  RB              ;007A: 8B          
+     400/      7B : A0                  		PLO  R0              ;007B: A0      Reset R0    
+     401/      7C : E1                  		SEX  R1              ;007C: E1          
+     402/      7D : E1                  		SEX  R1              ;007D: E1          
+     403/      7E :                     R007E
+     404/      7E : 65                  		OUT  5               ;007E: 65       Enable second (NTSC) or third (PAL) burst of DMA outs by Video chip, 0x10 Bytes   
+     405/      7F : 00                  		DB   00H             ;007F: 00
+     406/      80 : 8A                  		GLO  RA              ;0080: 8A          
+     407/      81 : 3A 6C               		BNZ  R006C           ;0081: 3A 6C    Loop back to 0x6c until 64 lines are done.   
+     408/      83 : F8 03               		LDI  03H             ;0083: F8 03       
+     409/      85 : AB                  		PLO  RB              ;0085: AB          
+     410/      86 : F8 EF               		LDI  0EFH            ;0086: F8 EF       
+     411/      88 : A8                  		PLO  R8              ;0088: A8          
+     412/      89 :                     R0089
+     413/      89 : 08                  		LDN  R8              ;0089: 08          
+     414/      8A : AA                  		PLO  RA              ;008A: AA          
+     415/      8B : 32 8E               		BZ   R008E           ;008B: 32 8E       
+     416/      8D : 2A                  		DEC  RA              ;008D: 2A          
+     417/      8E :                     R008E
+     418/      8E : 8A                  		GLO  RA              ;008E: 8A          
+     419/      8F : 58                  		STR  R8              ;008F: 58          
+     420/      90 : 28                  		DEC  R8              ;0090: 28          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 8 - 24/08/19 19:51:57
+
+
+     421/      91 : 2B                  		DEC  RB              ;0091: 2B          
+     422/      92 : 8B                  		GLO  RB              ;0092: 8B          
+     423/      93 : 3A 89               		BNZ  R0089           ;0093: 3A 89       
+     424/      95 : E8                  		SEX  R8              ;0095: E8          
+     425/      96 : 08                  		LDN  R8              ;0096: 08          
+     426/      97 : 61                  		OUT  1               ;0097: 61       Set frequency   
+     427/      98 : 32 47               		BZ   R0047           ;0098: 32 47       
+     428/      9A : 08                  		LDN  R8              ;009A: 08          
+     429/      9B : 32 47               		BZ   R0047           ;009B: 32 47       
+     430/      9D : 7B                  		SEQ                  ;009D: 7B          
+     431/      9E : 30 48               		BR   R0048           ;009E: 30 48    
+     432/      A0 :                     
+     433/      A0 :                     		
+     434/      A0 :                     ; Jump table command 4.n. to address 01xx
+     435/      A0 : 0B                  		DB   0BH             ;00A0: 0B
+     436/      A1 : 3E                  		DB   3EH             ;00A1: 3E
+     437/      A2 : 3E                  		DB   3EH             ;00A2: 3E
+     438/      A3 : 3E                  		DB   3EH             ;00A3: 3E
+     439/      A4 : 3E                  		DB   3EH             ;00A4: 3E
+     440/      A5 : 3E                  		DB   3EH             ;00A5: 3E
+     441/      A6 : 55                  		DB   55H             ;00A6: 55
+     442/      A7 : 98                  		DB   98H             ;00A7: 98
+     443/      A8 : 98                  		DB   98H             ;00A8: 98
+     444/      A9 : 6D                  		DB   6DH             ;00A9: 6D
+     445/      AA : 28                  		DB   28H             ;00AA: 28
+     446/      AB : 83                  		DB   83H             ;00AB: 83
+     447/      AC : 8A                  		DB   8AH             ;00AC: 8A
+     448/      AD : 88                  		DB   88H             ;00AD: 88
+     449/      AE : E0                  		DB   0E0H            ;00AE: E0
+     450/      AF : CA                  		DB   0CAH            ;00AF: CA
+     451/      B0 :                     
+     452/      B0 :                     ; Jump table command 5.n. to address 03xx
+     453/      B0 : 60                  		DB   60H             ;00B0: 60
+     454/      B1 : 1C                  		DB   1CH             ;00B1: 1C
+     455/      B2 : 74                  		DB   74H             ;00B2: 74
+     456/      B3 : 2E                  		DB   2EH             ;00B3: 2E
+     457/      B4 : 37                  		DB   37H             ;00B4: 37
+     458/      B5 : 6C                  		DB   6CH             ;00B5: 6C
+     459/      B6 : 6F                  		DB   6FH             ;00B6: 6F
+     460/      B7 : 74                  		DB   74H             ;00B7: 74
+     461/      B8 : 4A                  		DB   4AH             ;00B8: 4A
+     462/      B9 : 54                  		DB   54H             ;00B9: 54
+     463/      BA : 3C                  		DB   3CH             ;00BA: 3C
+     464/      BB : 45                  		DB   45H             ;00BB: 45
+     465/      BC : 10                  		DB   10H             ;00BC: 10
+     466/      BD : 16                  		DB   16H             ;00BD: 16
+     467/      BE : 26                  		DB   26H             ;00BE: 26
+     468/      BF : F8                  		DB   0F8H            ;00BF: F8
+     469/      C0 :                     
+     470/      C0 :                     ; Jump table command 6n..  to address 04xx
+     471/      C0 : 6A                  		DB   6AH             ;00C0: 6A
+     472/      C1 : 78                  		DB   78H             ;00C1: 78
+     473/      C2 : 06                  		DB   06H             ;00C2: 06
+     474/      C3 : 0E                  		DB   0EH             ;00C3: 0E
+     475/      C4 : 19                  		DB   19H             ;00C4: 19
+     476/      C5 : 20                  		DB   20H             ;00C5: 20
+     477/      C6 : 7D                  		DB   7DH             ;00C6: 7D
+     478/      C7 : 7D                  		DB   7DH             ;00C7: 7D
+     479/      C8 : 7D                  		DB   7DH             ;00C8: 7D
+     480/      C9 : 34                  		DB   34H             ;00C9: 34
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 9 - 24/08/19 19:51:57
+
+
+     481/      CA : 49                  		DB   49H             ;00CA: 49
+     482/      CB : 44                  		DB   44H             ;00CB: 44
+     483/      CC : 50                  		DB   50H             ;00CC: 50
+     484/      CD : A0                  		DB   0A0H            ;00CD: A0
+     485/      CE : 5A                  		DB   5AH             ;00CE: 5A
+     486/      CF : 62                  		DB   62H             ;00CF: 62
+     487/      D0 :                     		
+     488/      D0 :                     ; Jump table for comand handling, high byte on Dx, low byt on Ex, x is first nibble of the command
+     489/      D0 : 02                  		DB   02H             ;00D0: 02
+     490/      D1 : 02                  		DB   02H             ;00D1: 02
+     491/      D2 : 02                  		DB   02H             ;00D2: 02
+     492/      D3 : 02                  		DB   02H             ;00D3: 02
+     493/      D4 : 01                  		DB   01H             ;00D4: 01
+     494/      D5 : 03                  		DB   03H             ;00D5: 03
+     495/      D6 : 04                  		DB   04H             ;00D6: 04
+     496/      D7 : 01                  		DB   01H             ;00D7: 01
+     497/      D8 : 02                  		DB   02H             ;00D8: 02
+     498/      D9 : 02                  		DB   02H             ;00D9: 02
+     499/      DA : 03                  		DB   03H             ;00DA: 03
+     500/      DB : 03                  		DB   03H             ;00DB: 03
+     501/      DC : 02                  		DB   02H             ;00DC: 02
+     502/      DD : 02                  		DB   02H             ;00DD: 02
+     503/      DE : 02                  		DB   02H             ;00DE: 02
+     504/      DF : 02                  		DB   02H             ;00DF: 02
+     505/      E0 : 93                  		DB   93H             ;00E0: 93
+     506/      E1 : 93                  		DB   93H             ;00E1: 93
+     507/      E2 : 93                  		DB   93H             ;00E2: 93
+     508/      E3 : 93                  		DB   93H             ;00E3: 93
+     509/      E4 : 00                  		DB   00H             ;00E4: 00
+     510/      E5 : 00                  		DB   00H             ;00E5: 00
+     511/      E6 : 00                  		DB   00H             ;00E6: 00
+     512/      E7 : DD                  		DB   0DDH            ;00E7: DD
+     513/      E8 : 89                  		DB   89H             ;00E8: 89
+     514/      E9 : 8F                  		DB   8FH             ;00E9: 8F
+     515/      EA : EB                  		DB   0EBH            ;00EA: EB
+     516/      EB : F1                  		DB   0F1H            ;00EB: F1
+     517/      EC : 72                  		DB   72H             ;00EC: 72
+     518/      ED : D2                  		DB   0D2H            ;00ED: D2
+     519/      EE : D7                  		DB   0D7H            ;00EE: D7
+     520/      EF : 9E                  		DB   9EH             ;00EF: 9E
+     521/      F0 :                     		
+     522/      F0 :                     ; 3 bytes used for decimal conversions
+     523/      F0 : 64                  		DB   64H             ;00F0: 64
+     524/      F1 : 0A                  		DB   0AH             ;00F1: 0A
+     525/      F2 : 01                  		DB   01H             ;00F2: 01
+     526/      F3 :                     		
+     527/      F3 :                     R00F3
+     528/      F3 : D3                  		SEP  R3              ;00F3: D3          
+     529/      F4 :                     S00F4
+     530/      F4 : 22                  		DEC  R2              ;00F4: 22          
+     531/      F5 : 86                  		GLO  R6              ;00F5: 86          
+     532/      F6 : 52                  		STR  R2              ;00F6: 52          
+     533/      F7 : E2                  		SEX  R2              ;00F7: E2          
+     534/      F8 : 87                  		GLO  R7              ;00F8: 87          
+     535/      F9 : F3                  		XOR                  ;00F9: F3          
+     536/      FA : 16                  		INC  R6              ;00FA: 16          
+     537/      FB : 1E                  		INC  RE              ;00FB: 1E          
+     538/      FC : 12                  		INC  R2              ;00FC: 12          
+     539/      FD : 30 F3               		BR   R00F3           ;00FD: 30 F3       
+     540/      FF : 00                  		DB   00H             ;00FF: 00
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 10 - 24/08/19 19:51:57
+
+
+     541/     100 :                     
+     542/     100 :                     ; Opcode: 4.n. Start routine, jump table on 00A0, jump on n.
+     543/     100 :                     OPCODE4
+     544/     100 : 8F                  		GLO  RF              ;0100: 8F          
+     545/     101 : F6                  		SHR                  ;0101: F6          
+     546/     102 : F6                  		SHR                  ;0102: F6          
+     547/     103 : F6                  		SHR                  ;0103: F6          
+     548/     104 : F6                  		SHR                  ;0104: F6          
+     549/     105 : E6                  		SEX  R6              ;0105: E6          
+     550/     106 : F9 A0               		ORI  0A0H            ;0106: F9 A0       
+     551/     108 : AC                  		PLO  RC              ;0108: AC          
+     552/     109 : 0C                  		LDN  RC              ;0109: 0C          
+     553/     10A : A3                  		PLO  R3              ;010A: A3          
+     554/     10B :                     
+     555/     10B :                     ; Opcode: 4x0y    LD B, [Vy], Vx	  Convert Vx to 3 digit decimal at [Vy+2700], [Vy+2701], [Vy+2702]
+     556/     10B :                     ;                 LD B, Vy, Vx
+     557/     10B :                     OPCODE4x0
+     558/     10B : 06                  		LDN  R6              ;010B: 06          
+     559/     10C : BF                  		PHI  RF              ;010C: BF          
+     560/     10D : F8 F0               		LDI  0F0H            ;010D: F8 F0       
+     561/     10F : AC                  		PLO  RC              ;010F: AC          
+     562/     110 : 07                  		LDN  R7              ;0110: 07          
+     563/     111 : A7                  		PLO  R7              ;0111: A7          
+     564/     112 : 27                  		DEC  R7              ;0112: 27          
+     565/     113 :                     R0113
+     566/     113 : 17                  		INC  R7              ;0113: 17          
+     567/     114 : 94                  		GHI  R4              ;0114: 94          
+     568/     115 : 57                  		STR  R7              ;0115: 57          
+     569/     116 :                     R0116
+     570/     116 : 0C                  		LDN  RC              ;0116: 0C          
+     571/     117 : F5                  		SD                   ;0117: F5          
+     572/     118 : 3B 21               		BNF  R0121           ;0118: 3B 21       
+     573/     11A : 56                  		STR  R6              ;011A: 56          
+     574/     11B : 07                  		LDN  R7              ;011B: 07          
+     575/     11C : FC 01               		ADI  01H             ;011C: FC 01       
+     576/     11E : 57                  		STR  R7              ;011E: 57          
+     577/     11F : 30 16               		BR   R0116           ;011F: 30 16       
+     578/     121 :                     R0121
+     579/     121 : 4C                  		LDA  RC              ;0121: 4C          
+     580/     122 : F6                  		SHR                  ;0122: F6          
+     581/     123 : 3B 13               		BNF  R0113           ;0123: 3B 13       
+     582/     125 : 9F                  		GHI  RF              ;0125: 9F          
+     583/     126 : 56                  		STR  R6              ;0126: 56          
+     584/     127 : D4                  		SEP  R4              ;0127: D4          
+     585/     128 :                     
+     586/     128 :                     ; Opcode: 4xAy    ADDN Vx, Vy       ADD Nibbles, Vx-n0 = Vx-n0 + Vy-n0 and Vx-n1 = Vx-n1 + Vy-n1
+     587/     128 :                     ;                                   (Vx-n0 is the lower 4 bits of Vx, Vx-n1 the higer 4 bits)
+     588/     128 :                     OPCODE4xA
+     589/     128 : 07                  		LDN  R7              ;0128: 07          
+     590/     129 : F4                  		ADD                  ;0129: F4          
+     591/     12A : FA 0F               		ANI  0FH             ;012A: FA 0F       
+     592/     12C : BC                  		PHI  RC              ;012C: BC          
+     593/     12D : 06                  		LDN  R6              ;012D: 06          
+     594/     12E : FA F0               		ANI  0F0H            ;012E: FA F0       
+     595/     130 : 56                  		STR  R6              ;0130: 56          
+     596/     131 : 07                  		LDN  R7              ;0131: 07          
+     597/     132 : FA F0               		ANI  0F0H            ;0132: FA F0       
+     598/     134 : F4                  		ADD                  ;0134: F4          
+     599/     135 : 56                  		STR  R6              ;0135: 56          
+     600/     136 : 9C                  		GHI  RC              ;0136: 9C          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 11 - 24/08/19 19:51:57
+
+
+     601/     137 : F1                  		OR                   ;0137: F1          
+     602/     138 : 56                  		STR  R6              ;0138: 56          
+     603/     139 : D4                  		SEP  R4              ;0139: D4          
+     604/     13A :                     R013A
+     605/     13A : 8F                  		GLO  RF              ;013A: 8F          
+     606/     13B : F4                  		ADD                  ;013B: F4          
+     607/     13C : 56                  		STR  R6              ;013C: 56          
+     608/     13D : D4                  		SEP  R4              ;013D: D4          
+     609/     13E :                     
+     610/     13E :                     ; Opcode: 4x1y    OR Vx, Vy         Vx = Vx OR Vy
+     611/     13E :                     ;         4x2y    AND Vx, Vy        Vx = Vx + Vy
+     612/     13E :                     ;         4x3y    XOR Vx, Vy        Vx = Vx XOR Vy
+     613/     13E :                     ;         4x4y    ADD Vx, Vy        Vx = Vx + Vy, VB is carry / not borrow
+     614/     13E :                     ;         4x5y    SUB Vx, Vy        Vx = Vx - Vy, VB is carry / not borrow
+     615/     13E :                     OPCODE4x12345
+     616/     13E : 22                  		DEC  R2              ;013E: 22          
+     617/     13F : F8 D3               		LDI  0D3H            ;013F: F8 D3       
+     618/     141 : 52                  		STR  R2              ;0141: 52          
+     619/     142 : 22                  		DEC  R2              ;0142: 22          
+     620/     143 : 8F                  		GLO  RF              ;0143: 8F          
+     621/     144 : F6                  		SHR                  ;0144: F6          
+     622/     145 : F6                  		SHR                  ;0145: F6          
+     623/     146 : F6                  		SHR                  ;0146: F6          
+     624/     147 : F6                  		SHR                  ;0147: F6          
+     625/     148 : F9 F0               		ORI  0F0H            ;0148: F9 F0       
+     626/     14A : 52                  		STR  R2              ;014A: 52          
+     627/     14B : 07                  		LDN  R7              ;014B: 07          
+     628/     14C : D2                  		SEP  R2              ;014C: D2          
+     629/     14D :                     S014D
+     630/     14D : 56                  		STR  R6              ;014D: 56          
+     631/     14E : F8 EB               		LDI  0EBH            ;014E: F8 EB       
+     632/     150 : A7                  		PLO  R7              ;0150: A7          
+     633/     151 : 94                  		GHI  R4              ;0151: 94          
+     634/     152 : 7E                  		SHLC                 ;0152: 7E          
+     635/     153 : 57                  		STR  R7              ;0153: 57          
+     636/     154 : D4                  		SEP  R4              ;0154: D4          
+     637/     155 :                     
+     638/     155 :                     ; Opcode: 4x6n    SHL Vx, n         Vx = Vx SHL n times, VB will contains bits shifted 'out of Vx'
+     639/     155 :                     OPCODE4x6
+     640/     155 : 8F                  		GLO  RF              ;0155: 8F          
+     641/     156 : FA 0F               		ANI  0FH             ;0156: FA 0F       
+     642/     158 : AF                  		PLO  RF              ;0158: AF          
+     643/     159 : F8 EB               		LDI  0EBH            ;0159: F8 EB       
+     644/     15B : A7                  		PLO  R7              ;015B: A7          
+     645/     15C : 94                  		GHI  R4              ;015C: 94          
+     646/     15D : 57                  		STR  R7              ;015D: 57          
+     647/     15E :                     R015E
+     648/     15E : 8F                  		GLO  RF              ;015E: 8F          
+     649/     15F : 3A 62               		BNZ  R0162           ;015F: 3A 62       
+     650/     161 : D4                  		SEP  R4              ;0161: D4          
+     651/     162 :                     R0162
+     652/     162 : 06                  		LDN  R6              ;0162: 06          
+     653/     163 : FE                  		SHL                  ;0163: FE          
+     654/     164 : 56                  		STR  R6              ;0164: 56          
+     655/     165 : 07                  		LDN  R7              ;0165: 07          
+     656/     166 : 7E                  		SHLC                 ;0166: 7E          
+     657/     167 : 57                  		STR  R7              ;0167: 57          
+     658/     168 : 2F                  		DEC  RF              ;0168: 2F          
+     659/     169 : 30 5E               		BR   R015E           ;0169: 30 5E       
+     660/     16B : 00                  		DB   00H             ;016B: 00
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 12 - 24/08/19 19:51:57
+
+
+     661/     16C : 00                  		DB   00H             ;016C: 00
+     662/     16D :                     
+     663/     16D :                     ; Opcode: 4x9n    SHR Vx, n         Vx = Vx SHR n times, VB will contains bits shifted 'out of Vx'
+     664/     16D :                     OPCODE4x9
+     665/     16D : 8F                  		GLO  RF              ;016D: 8F          
+     666/     16E : FA 0F               		ANI  0FH             ;016E: FA 0F       
+     667/     170 : AF                  		PLO  RF              ;0170: AF          
+     668/     171 : F8 EB               		LDI  0EBH            ;0171: F8 EB       
+     669/     173 : A7                  		PLO  R7              ;0173: A7          
+     670/     174 : 94                  		GHI  R4              ;0174: 94          
+     671/     175 : 57                  		STR  R7              ;0175: 57          
+     672/     176 :                     R0176
+     673/     176 : 8F                  		GLO  RF              ;0176: 8F          
+     674/     177 : 3A 7A               		BNZ  R017A           ;0177: 3A 7A       
+     675/     179 : D4                  		SEP  R4              ;0179: D4          
+     676/     17A :                     R017A
+     677/     17A : 06                  		LDN  R6              ;017A: 06          
+     678/     17B : F6                  		SHR                  ;017B: F6          
+     679/     17C : 56                  		STR  R6              ;017C: 56          
+     680/     17D : 07                  		LDN  R7              ;017D: 07          
+     681/     17E : 76                  		SHRC                 ;017E: 76          
+     682/     17F : 57                  		STR  R7              ;017F: 57          
+     683/     180 : 2F                  		DEC  RF              ;0180: 2F          
+     684/     181 : 30 76               		BR   R0176           ;0181: 30 76       
+     685/     183 :                     
+     686/     183 :                     ; Opcode: 4.B.    JP I              Jump to address I
+     687/     183 :                     ; 				  JP
+     688/     183 : 9E                  		GHI  RE              ;0183: 9E          
+     689/     184 : B5                  		PHI  R5              ;0184: B5          
+     690/     185 : 8E                  		GLO  RE              ;0185: 8E          
+     691/     186 : A5                  		PLO  R5              ;0186: A5          
+     692/     187 : D4                  		SEP  R4              ;0187: D4          
+     693/     188 :                     
+     694/     188 :                     ; Opcode: 4.D.    STOP              Wait in endless loop
+     695/     188 :                     OPCODE4xD
+     696/     188 : 30 88               		BR   OPCODE4xD       ;0188: 30 88       
+     697/     18A :                     
+     698/     18A :                     ; Opcode: 4xCy    SHR Vx, Vy        Vx = (Vx SHR 3) AND 0xF, Vy =(Vy SHR 2) AND 0xF
+     699/     18A :                     OPCODE4xC
+     700/     18A : 06                  		LDN  R6              ;018A: 06          
+     701/     18B : F6                  		SHR                  ;018B: F6          
+     702/     18C : F6                  		SHR                  ;018C: F6          
+     703/     18D : F6                  		SHR                  ;018D: F6          
+     704/     18E : FA 0F               		ANI  0FH             ;018E: FA 0F       
+     705/     190 : 56                  		STR  R6              ;0190: 56          
+     706/     191 : 07                  		LDN  R7              ;0191: 07          
+     707/     192 : F6                  		SHR                  ;0192: F6          
+     708/     193 : F6                  		SHR                  ;0193: F6          
+     709/     194 : FA 0F               		ANI  0FH             ;0194: FA 0F       
+     710/     196 : 57                  		STR  R7              ;0196: 57          
+     711/     197 : D4                  		SEP  R4              ;0197: D4          
+     712/     198 :                     
+     713/     198 :                     ; Opcode: 4x7y    KEYP Vy           Wait for key and return key in Vy
+     714/     198 :                     ;                                   VA contains keypad (0 key pad player 1, 1 keypad player 2)
+     715/     198 :                     ; 	  		  					    VC = x << 3
+     716/     198 :                     ;         4x8y    KEYR Vy           Wait for key press/release and return key in Vy
+     717/     198 :                     ;                                   VA contains keypad (0 key pad player 1, 1 keypad player 2)
+     718/     198 :                     ;                                   VC = x << 3
+     719/     198 :                     OPCODE4x78
+     720/     198 : F8 02               		LDI  02H             ;0198: F8 02       
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 13 - 24/08/19 19:51:57
+
+
+     721/     19A : BC                  		PHI  RC              ;019A: BC          
+     722/     19B :                     R019B
+     723/     19B : F8 A2               		LDI  0A2H            ;019B: F8 A2       
+     724/     19D : AC                  		PLO  RC              ;019D: AC          
+     725/     19E : DC                  		SEP  RC              ;019E: DC          
+     726/     19F : 33 9B               		BDF  R019B           ;019F: 33 9B       
+     727/     1A1 : 57                  		STR  R7              ;01A1: 57          
+     728/     1A2 : F8 EC               		LDI  0ECH            ;01A2: F8 EC       
+     729/     1A4 : A7                  		PLO  R7              ;01A4: A7          
+     730/     1A5 : 9F                  		GHI  RF              ;01A5: 9F          
+     731/     1A6 : FE                  		SHL                  ;01A6: FE          
+     732/     1A7 : FE                  		SHL                  ;01A7: FE          
+     733/     1A8 : FE                  		SHL                  ;01A8: FE          
+     734/     1A9 : 57                  		STR  R7              ;01A9: 57          
+     735/     1AA : 17                  		INC  R7              ;01AA: 17          
+     736/     1AB : F8 05               		LDI  05H             ;01AB: F8 05       
+     737/     1AD : 57                  		STR  R7              ;01AD: 57          
+     738/     1AE :                     R01AE
+     739/     1AE : 07                  		LDN  R7              ;01AE: 07          
+     740/     1AF : 3A AE               		BNZ  R01AE           ;01AF: 3A AE       
+     741/     1B1 : 8F                  		GLO  RF              ;01B1: 8F          
+     742/     1B2 : FE                  		SHL                  ;01B2: FE          
+     743/     1B3 : 33 B6               		BDF  R01B6           ;01B3: 33 B6       
+     744/     1B5 : D4                  		SEP  R4              ;01B5: D4          
+     745/     1B6 :                     R01B6
+     746/     1B6 : F8 05               		LDI  05H             ;01B6: F8 05       
+     747/     1B8 : 57                  		STR  R7              ;01B8: 57          
+     748/     1B9 :                     R01B9
+     749/     1B9 : 06                  		LDN  R6              ;01B9: 06          
+     750/     1BA : F6                  		SHR                  ;01BA: F6          
+     751/     1BB : 33 C3               		BDF  R01C3           ;01BB: 33 C3       
+     752/     1BD : 3E C7               		BN3  R01C7           ;01BD: 3E C7       
+     753/     1BF : 36 B6               		B3   R01B6           ;01BF: 36 B6       
+     754/     1C1 : 30 C7               		BR   R01C7           ;01C1: 30 C7       
+     755/     1C3 :                     R01C3
+     756/     1C3 : 3F C7               		BN4  R01C7           ;01C3: 3F C7       
+     757/     1C5 : 37 B6               		B4   R01B6           ;01C5: 37 B6       
+     758/     1C7 :                     R01C7
+     759/     1C7 : 31 B9               		BQ   R01B9           ;01C7: 31 B9       
+     760/     1C9 : D4                  		SEP  R4              ;01C9: D4          
+     761/     1CA :                     
+     762/     1CA :                     ; Opcode: 4.Fy    KEY Vy            Check if key is pressed, if so return key in Vy and VB=1
+     763/     1CA :                     ;                                   (VB=0, no key pressed)
+     764/     1CA :                     ;                                   VA contains keypad (0 key pad player 1, 1 keypad player 2)
+     765/     1CA :                     
+     766/     1CA : F8 02               		LDI  02H             ;01CA: F8 02       
+     767/     1CC : BC                  		PHI  RC              ;01CC: BC          
+     768/     1CD : F8 A2               		LDI  0A2H            ;01CD: F8 A2       
+     769/     1CF : AC                  		PLO  RC              ;01CF: AC          
+     770/     1D0 : 94                  		GHI  R4              ;01D0: 94          
+     771/     1D1 : AF                  		PLO  RF              ;01D1: AF          
+     772/     1D2 : DC                  		SEP  RC              ;01D2: DC          
+     773/     1D3 :                     S01D3
+     774/     1D3 : 33 D7               		BDF  R01D7           ;01D3: 33 D7       
+     775/     1D5 : 1F                  		INC  RF              ;01D5: 1F          
+     776/     1D6 : 57                  		STR  R7              ;01D6: 57          
+     777/     1D7 :                     R01D7
+     778/     1D7 : F8 EB               		LDI  0EBH            ;01D7: F8 EB       
+     779/     1D9 : A7                  		PLO  R7              ;01D9: A7          
+     780/     1DA : 8F                  		GLO  RF              ;01DA: 8F          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 14 - 24/08/19 19:51:57
+
+
+     781/     1DB : 57                  		STR  R7              ;01DB: 57          
+     782/     1DC : D4                  		SEP  R4              ;01DC: D4      
+     783/     1DD :                     		
+     784/     1DD :                     ; Opcode: 7xkk    ADD Vx, kk        Vx=Vx+kk
+     785/     1DD :                     OPCODE7
+     786/     1DD : E6                  		SEX  R6              ;01DD: E6          
+     787/     1DE : 30 3A               		BR   R013A           ;01DE: 30 3A       
+     788/     1E0 :                     
+     789/     1E0 :                     ; Opcode: 4xEn	DRW I, Vx, n      Draw pattern from [I] on screen position Vx, V(x+1) (128x64 positions),
+     790/     1E0 :                     ;                                 width 8 pixels; n lines.
+     791/     1E0 :                     OPCODE4xE
+     792/     1E0 : E2                  		SEX  R2              ;01E0: E2          
+     793/     1E1 : 22                  		DEC  R2              ;01E1: 22          
+     794/     1E2 : 06                  		LDN  R6              ;01E2: 06          
+     795/     1E3 : FA 07               		ANI  07H             ;01E3: FA 07       
+     796/     1E5 : B7                  		PHI  R7              ;01E5: B7          
+     797/     1E6 : 46                  		LDA  R6              ;01E6: 46          
+     798/     1E7 : FA 7F               		ANI  7FH             ;01E7: FA 7F       
+     799/     1E9 : F6                  		SHR                  ;01E9: F6          
+     800/     1EA : F6                  		SHR                  ;01EA: F6          
+     801/     1EB : F6                  		SHR                  ;01EB: F6          
+     802/     1EC : 52                  		STR  R2              ;01EC: 52          
+     803/     1ED : 8F                  		GLO  RF              ;01ED: 8F          
+     804/     1EE : FA 0F               		ANI  0FH             ;01EE: FA 0F       
+     805/     1F0 : BF                  		PHI  RF              ;01F0: BF          
+     806/     1F1 : F8 20               		LDI  20H             ;01F1: F8 20       
+     807/     1F3 : AF                  		PLO  RF              ;01F3: AF          
+     808/     1F4 : 06                  		LDN  R6              ;01F4: 06          
+     809/     1F5 : FA 3F               		ANI  3FH             ;01F5: FA 3F       
+     810/     1F7 : FE                  		SHL                  ;01F7: FE          
+     811/     1F8 : FE                  		SHL                  ;01F8: FE          
+     812/     1F9 : FE                  		SHL                  ;01F9: FE          
+     813/     1FA : 3B FE               		BNF  R01FE           ;01FA: 3B FE       
+     814/     1FC : 1F                  		INC  RF              ;01FC: 1F          
+     815/     1FD : 1F                  		INC  RF              ;01FD: 1F          
+     816/     1FE :                     R01FE
+     817/     1FE : FE                  		SHL                  ;01FE: FE          
+     818/     1FF : 3B 02               		BNF  R0202           ;01FF: 3B 02       
+     819/     201 : 1F                  		INC  RF              ;0201: 1F          
+     820/     202 :                     R0202
+     821/     202 : F4                  		ADD                  ;0202: F4          
+     822/     203 : AC                  		PLO  RC              ;0203: AC          
+     823/     204 : 8F                  		GLO  RF              ;0204: 8F          
+     824/     205 : BC                  		PHI  RC              ;0205: BC          
+     825/     206 : F8 C0               		LDI  0C0H            ;0206: F8 C0       
+     826/     208 : A6                  		PLO  R6              ;0208: A6          
+     827/     209 : 9F                  		GHI  RF              ;0209: 9F          
+     828/     20A : AF                  		PLO  RF              ;020A: AF          
+     829/     20B :                     R020B
+     830/     20B : 94                  		GHI  R4              ;020B: 94          
+     831/     20C : AD                  		PLO  RD              ;020C: AD          
+     832/     20D : 8F                  		GLO  RF              ;020D: 8F          
+     833/     20E : 3A 19               		BNZ  R0219           ;020E: 3A 19       
+     834/     210 : 9F                  		GHI  RF              ;0210: 9F          
+     835/     211 : AF                  		PLO  RF              ;0211: AF          
+     836/     212 :                     R0212
+     837/     212 : 8F                  		GLO  RF              ;0212: 8F          
+     838/     213 : 32 32               		BZ   R0232           ;0213: 32 32       
+     839/     215 : 2E                  		DEC  RE              ;0215: 2E          
+     840/     216 : 2F                  		DEC  RF              ;0216: 2F          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 15 - 24/08/19 19:51:57
+
+
+     841/     217 : 30 12               		BR   R0212           ;0217: 30 12       
+     842/     219 :                     R0219
+     843/     219 : 2F                  		DEC  RF              ;0219: 2F          
+     844/     21A : 4E                  		LDA  RE              ;021A: 4E          
+     845/     21B : BD                  		PHI  RD              ;021B: BD          
+     846/     21C : 97                  		GHI  R7              ;021C: 97          
+     847/     21D : A7                  		PLO  R7              ;021D: A7          
+     848/     21E :                     R021E
+     849/     21E : 87                  		GLO  R7              ;021E: 87          
+     850/     21F : 32 2A               		BZ   R022A           ;021F: 32 2A       
+     851/     221 : 9D                  		GHI  RD              ;0221: 9D          
+     852/     222 : F6                  		SHR                  ;0222: F6          
+     853/     223 : BD                  		PHI  RD              ;0223: BD          
+     854/     224 : 8D                  		GLO  RD              ;0224: 8D          
+     855/     225 : 76                  		SHRC                 ;0225: 76          
+     856/     226 : AD                  		PLO  RD              ;0226: AD          
+     857/     227 : 27                  		DEC  R7              ;0227: 27          
+     858/     228 : 30 1E               		BR   R021E           ;0228: 30 1E       
+     859/     22A :                     R022A
+     860/     22A : 9D                  		GHI  RD              ;022A: 9D          
+     861/     22B : 56                  		STR  R6              ;022B: 56          
+     862/     22C : 16                  		INC  R6              ;022C: 16          
+     863/     22D : 8D                  		GLO  RD              ;022D: 8D          
+     864/     22E : 56                  		STR  R6              ;022E: 56          
+     865/     22F : 16                  		INC  R6              ;022F: 16          
+     866/     230 : 30 0B               		BR   R020B           ;0230: 30 0B       
+     867/     232 :                     R0232
+     868/     232 : F8 F0               		LDI  0F0H            ;0232: F8 F0       
+     869/     234 : A6                  		PLO  R6              ;0234: A6          
+     870/     235 : D6                  		SEP  R6              ;0235: D6          
+     871/     236 :                     S0236
+     872/     236 : EC                  		SEX  RC              ;0236: EC          
+     873/     237 : F8 C0               		LDI  0C0H            ;0237: F8 C0       
+     874/     239 : A6                  		PLO  R6              ;0239: A6          
+     875/     23A : 96                  		GHI  R6              ;023A: 96          
+     876/     23B : BD                  		PHI  RD              ;023B: BD          
+     877/     23C : F8 F8               		LDI  0F8H            ;023C: F8 F8       
+     878/     23E : AD                  		PLO  RD              ;023E: AD          
+     879/     23F : 94                  		GHI  R4              ;023F: 94          
+     880/     240 : 5D                  		STR  RD              ;0240: 5D          
+     881/     241 : 9F                  		GHI  RF              ;0241: 9F          
+     882/     242 : AF                  		PLO  RF              ;0242: AF          
+     883/     243 :                     R0243
+     884/     243 : 8F                  		GLO  RF              ;0243: 8F          
+     885/     244 : 32 6F               		BZ   R026F           ;0244: 32 6F       
+     886/     246 : 06                  		LDN  R6              ;0246: 06          
+     887/     247 : F2                  		AND                  ;0247: F2          
+     888/     248 : 2F                  		DEC  RF              ;0248: 2F          
+     889/     249 : 32 4E               		BZ   R024E           ;0249: 32 4E       
+     890/     24B : F8 01               		LDI  01H             ;024B: F8 01       
+     891/     24D : 5D                  		STR  RD              ;024D: 5D          
+     892/     24E :                     R024E
+     893/     24E : 46                  		LDA  R6              ;024E: 46          
+     894/     24F : F3                  		XOR                  ;024F: F3          
+     895/     250 : 5C                  		STR  RC              ;0250: 5C          
+     896/     251 : 02                  		LDN  R2              ;0251: 02          
+     897/     252 : FB 0F               		XRI  0FH             ;0252: FB 0F       
+     898/     254 : 32 62               		BZ   R0262           ;0254: 32 62       
+     899/     256 : 1C                  		INC  RC              ;0256: 1C          
+     900/     257 : 06                  		LDN  R6              ;0257: 06          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 16 - 24/08/19 19:51:57
+
+
+     901/     258 : F2                  		AND                  ;0258: F2          
+     902/     259 : 32 5E               		BZ   R025E           ;0259: 32 5E       
+     903/     25B : F8 01               		LDI  01H             ;025B: F8 01       
+     904/     25D : 5D                  		STR  RD              ;025D: 5D          
+     905/     25E :                     R025E
+     906/     25E : 06                  		LDN  R6              ;025E: 06          
+     907/     25F : F3                  		XOR                  ;025F: F3          
+     908/     260 : 5C                  		STR  RC              ;0260: 5C          
+     909/     261 : 2C                  		DEC  RC              ;0261: 2C          
+     910/     262 :                     R0262
+     911/     262 : 16                  		INC  R6              ;0262: 16          
+     912/     263 : 8C                  		GLO  RC              ;0263: 8C          
+     913/     264 : FC 10               		ADI  10H             ;0264: FC 10       
+     914/     266 : AC                  		PLO  RC              ;0266: AC          
+     915/     267 : 9C                  		GHI  RC              ;0267: 9C          
+     916/     268 : 7C 00               		ADCI 00H             ;0268: 7C 00       
+     917/     26A : BC                  		PHI  RC              ;026A: BC          
+     918/     26B : FB 24               		XRI  24H             ;026B: FB 24       
+     919/     26D : 3A 43               		BNZ  R0243           ;026D: 3A 43       
+     920/     26F :                     R026F
+     921/     26F : 12                  		INC  R2              ;026F: 12          
+     922/     270 : D4                  		SEP  R4              ;0270: D4          
+     923/     271 : 00                  		DB   00H             ;0271: 00
+     924/     272 :                     		
+     925/     272 :                     ; Opcode: Cxkk    RND Vx, kk        Vx = random byte masked by kk
+     926/     272 :                     OPCODEC
+     927/     272 : 19                  		INC  R9              ;0272: 19          
+     928/     273 : 89                  		GLO  R9              ;0273: 89          
+     929/     274 : AE                  		PLO  RE              ;0274: AE          
+     930/     275 : F6                  		SHR                  ;0275: F6          
+     931/     276 : F6                  		SHR                  ;0276: F6          
+     932/     277 : F6                  		SHR                  ;0277: F6          
+     933/     278 : F6                  		SHR                  ;0278: F6          
+     934/     279 : F6                  		SHR                  ;0279: F6          
+     935/     27A : F6                  		SHR                  ;027A: F6          
+     936/     27B : BE                  		PHI  RE              ;027B: BE          
+     937/     27C : 99                  		GHI  R9              ;027C: 99          
+     938/     27D : EE                  		SEX  RE              ;027D: EE          
+     939/     27E : F4                  		ADD                  ;027E: F4          
+     940/     27F : 56                  		STR  R6              ;027F: 56          
+     941/     280 : F6                  		SHR                  ;0280: F6          
+     942/     281 : E6                  		SEX  R6              ;0281: E6          
+     943/     282 : F4                  		ADD                  ;0282: F4          
+     944/     283 : B9                  		PHI  R9              ;0283: B9          
+     945/     284 : 56                  		STR  R6              ;0284: 56          
+     946/     285 : 8F                  		GLO  RF              ;0285: 8F          
+     947/     286 : F2                  		AND                  ;0286: F2          
+     948/     287 : 56                  		STR  R6              ;0287: 56          
+     949/     288 : D4                  		SEP  R4              ;0288: D4       
+     950/     289 :                     		
+     951/     289 :                     ; Opcode: 8xkk    JZ Vx, kk         Jump if variable Vx is zero to current page with offset kk
+     952/     289 :                     OPCDOE8
+     953/     289 : 06                  		LDN  R6              ;0289: 06          
+     954/     28A : 3A 8E               		BNZ  R028E           ;028A: 3A 8E       
+     955/     28C :                     R028C
+     956/     28C : 8F                  		GLO  RF              ;028C: 8F          
+     957/     28D : A5                  		PLO  R5              ;028D: A5          
+     958/     28E :                     R028E
+     959/     28E : D4                  		SEP  R4              ;028E: D4          
+     960/     28F :                     		
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 17 - 24/08/19 19:51:57
+
+
+     961/     28F :                     ; Opcode: 9xkk    JNZ Vx, kk        Jump if variable Vx is not zero to current page with offset kk
+     962/     28F :                     OPCDOE9
+     963/     28F : 06                  		LDN  R6              ;028F: 06          
+     964/     290 : 3A 8C               		BNZ  R028C           ;0290: 3A 8C       
+     965/     292 : D4                  		SEP  R4              ;0292: D4          
+     966/     293 :                     
+     967/     293 :                     ; Opcode: 0aaa    LD I, 0aaa        Load I with address 0000 to 0FFF
+     968/     293 :                     ;         1aaa    LD I, 1aaa        Load I with address 1000 to 1FFF
+     969/     293 :                     ;         2aaa    LD I, 2aaa        Load I with address 2000 to 2FFF
+     970/     293 :                     ;         3aaa    LD I, 3aaa        Load I with address 3000 to 3FFF
+     971/     293 :                     OPCODE0123
+     972/     293 : F8 F6               		LDI  0F6H            ;0293: F8 F6       
+     973/     295 : A6                  		PLO  R6              ;0295: A6          
+     974/     296 : 25                  		DEC  R5              ;0296: 25          
+     975/     297 : 25                  		DEC  R5              ;0297: 25          
+     976/     298 : 45                  		LDA  R5              ;0298: 45          
+     977/     299 : 56                  		STR  R6              ;0299: 56          
+     978/     29A : 16                  		INC  R6              ;029A: 16          
+     979/     29B : 45                  		LDA  R5              ;029B: 45          
+     980/     29C : 56                  		STR  R6              ;029C: 56          
+     981/     29D : D4                  		SEP  R4              ;029D: D4    
+     982/     29E :                     		
+     983/     29E :                     ; Opcode: Fxkk    LD Vx, kk         Vx = kk
+     984/     29E :                     OPCODEF
+     985/     29E : 8F                  		GLO  RF              ;029E: 8F          
+     986/     29F : 56                  		STR  R6              ;029F: 56          
+     987/     2A0 : D4                  		SEP  R4              ;02A0: D4          
+     988/     2A1 : 00                  		DB   00H             ;02A1: 00
+     989/     2A2 :                     S02A2
+     990/     2A2 : F8 EA               		LDI  0EAH            ;02A2: F8 EA       
+     991/     2A4 : A6                  		PLO  R6              ;02A4: A6          
+     992/     2A5 : F8 0F               		LDI  0FH             ;02A5: F8 0F       
+     993/     2A7 : AD                  		PLO  RD              ;02A7: AD          
+     994/     2A8 :                     R02A8
+     995/     2A8 : 22                  		DEC  R2              ;02A8: 22          
+     996/     2A9 : E2                  		SEX  R2              ;02A9: E2          
+     997/     2AA : 8D                  		GLO  RD              ;02AA: 8D          
+     998/     2AB : 52                  		STR  R2              ;02AB: 52          
+     999/     2AC : 62                  		OUT  2               ;02AC: 62          
+    1000/     2AD :                     R02AD
+    1001/     2AD : 06                  		LDN  R6              ;02AD: 06          
+    1002/     2AE : F6                  		SHR                  ;02AE: F6          
+    1003/     2AF : 33 B7               		BDF  R02B7           ;02AF: 33 B7       
+    1004/     2B1 : 3E BB               		BN3  R02BB           ;02B1: 3E BB       
+    1005/     2B3 : 36 C5               		B3   R02C5           ;02B3: 36 C5       
+    1006/     2B5 : 30 BB               		BR   R02BB           ;02B5: 30 BB       
+    1007/     2B7 :                     R02B7
+    1008/     2B7 : 3F BB               		BN4  R02BB           ;02B7: 3F BB       
+    1009/     2B9 : 37 C5               		B4   R02C5           ;02B9: 37 C5       
+    1010/     2BB :                     R02BB
+    1011/     2BB : 8D                  		GLO  RD              ;02BB: 8D          
+    1012/     2BC : 32 C1               		BZ   R02C1           ;02BC: 32 C1       
+    1013/     2BE : 2D                  		DEC  RD              ;02BE: 2D          
+    1014/     2BF : 30 A8               		BR   R02A8           ;02BF: 30 A8       
+    1015/     2C1 :                     R02C1
+    1016/     2C1 : F8 01               		LDI  01H             ;02C1: F8 01       
+    1017/     2C3 : F6                  		SHR                  ;02C3: F6          
+    1018/     2C4 : D3                  		SEP  R3              ;02C4: D3          
+    1019/     2C5 :                     R02C5
+    1020/     2C5 : 94                  		GHI  R4              ;02C5: 94          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 18 - 24/08/19 19:51:57
+
+
+    1021/     2C6 : F6                  		SHR                  ;02C6: F6          
+    1022/     2C7 : 8D                  		GLO  RD              ;02C7: 8D          
+    1023/     2C8 : D3                  		SEP  R3              ;02C8: D3          
+    1024/     2C9 :                     S02C9
+    1025/     2C9 : F8 EA               		LDI  0EAH            ;02C9: F8 EA       
+    1026/     2CB : A6                  		PLO  R6              ;02CB: A6          
+    1027/     2CC : E7                  		SEX  R7              ;02CC: E7          
+    1028/     2CD : 62                  		OUT  2               ;02CD: 62          
+    1029/     2CE : 94                  		GHI  R4              ;02CE: 94          
+    1030/     2CF : AD                  		PLO  RD              ;02CF: AD          
+    1031/     2D0 : 30 AD               		BR   R02AD           ;02D0: 30 AD    
+    1032/     2D2 :                     		
+    1033/     2D2 :                     ; Opcode: Dxkk    LD [27kk], Vx     Load address [27kk] with Vx
+    1034/     2D2 :                     OPCODED
+    1035/     2D2 : 8F                  		GLO  RF              ;02D2: 8F          
+    1036/     2D3 : A7                  		PLO  R7              ;02D3: A7          
+    1037/     2D4 : 06                  		LDN  R6              ;02D4: 06          
+    1038/     2D5 : 57                  		STR  R7              ;02D5: 57          
+    1039/     2D6 : D4                  		SEP  R4              ;02D6: D4          
+    1040/     2D7 :                     		
+    1041/     2D7 :                     ; Opcode: Exkk    LD Vx, [27kk]	  Load Vx with value on address [27kk]
+    1042/     2D7 : 8F                  		GLO  RF              ;02D7: 8F          
+    1043/     2D8 : A7                  		PLO  R7              ;02D8: A7          
+    1044/     2D9 : 07                  		LDN  R7              ;02D9: 07          
+    1045/     2DA : 56                  		STR  R6              ;02DA: 56          
+    1046/     2DB : D4                  		SEP  R4              ;02DB: D4          
+    1047/     2DC :                     
+    1048/     2DC :                     ; 02DC-02FE Studio IV Psuedo code, Start-up routine, initializing RAM and registers, continues on 04F0
+    1049/     2DC : FA 00               		DB   0FAH, 00H		 ;   02DC: LD    VA, 00        
+    1050/     2DE : FC 7E               		DB   0FCH, 7EH		 ;   02DE: LD    VC, 7E        
+    1051/     2E0 : FD 10               		DB   0FDH, 10H		 ;   02E0: LD    VD, 10        
+    1052/     2E2 : F0 00               		DB   0F0H, 00H		 ;   02E2: LD    V0, 00        
+    1053/     2E4 : F1 D3               		DB   0F1H, 0D3H		 ;   02E4: LD    V1, D3        
+    1054/     2E6 : F2 20               		DB   0F2H, 20H		 ;   02E6: LD    V2, 20        
+    1055/     2E8 : F3 00               		DB   0F3H, 00H		 ;   02E8: LD    V3, 00        
+    1056/     2EA : F4 00               		DB   0F4H, 00H		 ;   02EA: LD    V4, 00        
+    1057/     2EC : F5 40               		DB   0F5H, 40H		 ;   02EC: LD    V5, 40        
+    1058/     2EE : 27 F0               		DB   27H, 0F0H		 ;   02EE: LD    I, 27F0       
+    1059/     2F0 : 50 C5               		DB   50H, 0C5H		 ;   02F0: CP    V0, V5, [I]   
+    1060/     2F2 : F0 D1               		DB   0F0H, 0D1H		 ;   02F2: LD    V0, D1        
+    1061/     2F4 : D0 F9               		DB   0D0H, 0F9H		 ;   02F4: LD    [27F9], V0    
+    1062/     2F6 : FF 00               		DB   0FFH, 00H		 ;   02F6: LD    VF, 00        
+    1063/     2F8 : F6 00               		DB   0F6H, 00H		 ;   02F8: LD    V6, 00        
+    1064/     2FA : F9 00               		DB   0F9H, 00H		 ;   02FA: LD    V9, 00        
+    1065/     2FC : 04 F0               		DB   04H, 0F0H		 ;   02FC: LD    I, 04F0       
+    1066/     2FE : 4B BB               		DB   4BH, 0BBH		 ;   02FE: JP    I 
+    1067/     300 :                     		
+    1068/     300 :                     ; Opcode: 5.n. Start routine, jump table on 00B0, jump on n.
+    1069/     300 :                     OPCODE5
+    1070/     300 : 94                  		GHI  R4              ;0300: 94          
+    1071/     301 : BD                  		PHI  RD              ;0301: BD          
+    1072/     302 : F8 F4               		LDI  0F4H            ;0302: F8 F4       
+    1073/     304 : AD                  		PLO  RD              ;0304: AD          
+    1074/     305 : 8F                  		GLO  RF              ;0305: 8F          
+    1075/     306 : F6                  		SHR                  ;0306: F6          
+    1076/     307 : F6                  		SHR                  ;0307: F6          
+    1077/     308 : F6                  		SHR                  ;0308: F6          
+    1078/     309 : F6                  		SHR                  ;0309: F6          
+    1079/     30A : E6                  		SEX  R6              ;030A: E6          
+    1080/     30B : F9 B0               		ORI  0B0H            ;030B: F9 B0       
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 19 - 24/08/19 19:51:57
+
+
+    1081/     30D : AC                  		PLO  RC              ;030D: AC          
+    1082/     30E : 0C                  		LDN  RC              ;030E: 0C          
+    1083/     30F : A3                  		PLO  R3              ;030F: A3          
+    1084/     310 :                     
+    1085/     310 :                     ; Opcode: 5xCy    CP Vx, Vy, [I]    copy value Vx until Vy to [I] until [I+y]
+    1086/     310 :                     ;                 CP Vx, Vy, I
+    1087/     310 :                     R0310
+    1088/     310 : 06                  		LDN  R6              ;0310: 06          
+    1089/     311 : 5E                  		STR  RE              ;0311: 5E          
+    1090/     312 : DD                  		SEP  RD              ;0312: DD          
+    1091/     313 :                     S0313
+    1092/     313 : 3A 10               		BNZ  R0310           ;0313: 3A 10       
+    1093/     315 : D4                  		SEP  R4              ;0315: D4          
+    1094/     316 :                     
+    1095/     316 :                     ; Opcode: 5xDy    CP [I], Vx, Vy    copy value [I] until [I+y] to Vx until Vy
+    1096/     316 :                     ;                 CP I, Vx, Vy
+    1097/     316 :                     R0316
+    1098/     316 : 0E                  		LDN  RE              ;0316: 0E          
+    1099/     317 : 56                  		STR  R6              ;0317: 56          
+    1100/     318 : DD                  		SEP  RD              ;0318: DD          
+    1101/     319 :                     S0319
+    1102/     319 : 3A 16               		BNZ  R0316           ;0319: 3A 16       
+    1103/     31B : D4                  		SEP  R4              ;031B: D4    
+    1104/     31C :                     		
+    1105/     31C :                     ; Opcode: 5x1y    SWITCH Vx, Vy,[I] Switch value [I] and onwards with Vx until Vy
+    1106/     31C :                     ;                 SWITCH Vx, Vy, I
+    1107/     31C :                     R031C
+    1108/     31C : 0E                  		LDN  RE              ;031C: 0E          
+    1109/     31D : AF                  		PLO  RF              ;031D: AF          
+    1110/     31E : 06                  		LDN  R6              ;031E: 06          
+    1111/     31F : 5E                  		STR  RE              ;031F: 5E          
+    1112/     320 : 8F                  		GLO  RF              ;0320: 8F          
+    1113/     321 : 56                  		STR  R6              ;0321: 56          
+    1114/     322 : DD                  		SEP  RD              ;0322: DD          
+    1115/     323 :                     S0323
+    1116/     323 : 3A 1C               		BNZ  R031C           ;0323: 3A 1C       
+    1117/     325 : D4                  		SEP  R4              ;0325: D4   
+    1118/     326 :                     		
+    1119/     326 :                     ; Opcode: 5xEy    LD [Vy], Vx       [VyV(y+1)]=Vx
+    1120/     326 : 47                  		LDA  R7              ;0326: 47          
+    1121/     327 : BE                  		PHI  RE              ;0327: BE          
+    1122/     328 : 07                  		LDN  R7              ;0328: 07          
+    1123/     329 : AE                  		PLO  RE              ;0329: AE          
+    1124/     32A : 06                  		LDN  R6              ;032A: 06          
+    1125/     32B : 5E                  		STR  RE              ;032B: 5E          
+    1126/     32C : D4                  		SEP  R4              ;032C: D4          
+    1127/     32D : 00                  		DB   00H             ;032D: 00
+    1128/     32E :                     		
+    1129/     32E :                     ; Opcode: 5x3y    JE I, Vx, Vy      IF Vx=Vy THEN jump to I
+    1130/     32E :                     ;				  JE Vx, kk
+    1131/     32E : 07                  		LDN  R7              ;032E: 07          
+    1132/     32F : F3                  		XOR                  ;032F: F3          
+    1133/     330 : 3A 36               		BNZ  R0336           ;0330: 3A 36       
+    1134/     332 :                     R0332
+    1135/     332 : 9E                  		GHI  RE              ;0332: 9E          
+    1136/     333 : B5                  		PHI  R5              ;0333: B5          
+    1137/     334 : 8E                  		GLO  RE              ;0334: 8E          
+    1138/     335 : A5                  		PLO  R5              ;0335: A5          
+    1139/     336 :                     R0336
+    1140/     336 : D4                  		SEP  R4              ;0336: D4      
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 20 - 24/08/19 19:51:57
+
+
+    1141/     337 :                     		
+    1142/     337 :                     ; Opcode: 5x4y    JU I, Vx, Vy      IF Vx!=Vy THEN jump to I
+    1143/     337 : 07                  		LDN  R7              ;0337: 07          
+    1144/     338 : F3                  		XOR                  ;0338: F3          
+    1145/     339 : 3A 32               		BNZ  R0332           ;0339: 3A 32       
+    1146/     33B : D4                  		SEP  R4              ;033B: D4          
+    1147/     33C :                     
+    1148/     33C :                     ; Opcode: 5xAy    JG I, Vx, Vy      IF Vx > Vy THEN jump to I
+    1149/     33C :                     ;				  JG Vx, Vy
+    1150/     33C : 07                  		LDN  R7              ;033C: 07          
+    1151/     33D : F3                  		XOR                  ;033D: F3          
+    1152/     33E : 32 44               		BZ   R0344           ;033E: 32 44       
+    1153/     340 : 07                  		LDN  R7              ;0340: 07          
+    1154/     341 : F5                  		SD                   ;0341: F5          
+    1155/     342 : 33 32               		BDF  R0332           ;0342: 33 32       
+    1156/     344 :                     R0344
+    1157/     344 : D4                  		SEP  R4              ;0344: D4   
+    1158/     345 :                     		
+    1159/     345 :                     ; Opcode: 5xBy    JS I, Vx, Vy      IF Vx < Vy THEN jump to I
+    1160/     345 :                     ;				  JS Vx, Vy
+    1161/     345 : 07                  		LDN  R7              ;0345: 07          
+    1162/     346 : F5                  		SD                   ;0346: F5          
+    1163/     347 : 3B 32               		BNF  R0332           ;0347: 3B 32       
+    1164/     349 : D4                  		SEP  R4              ;0349: D4       
+    1165/     34A :                     		
+    1166/     34A :                     ; Opcode: 5.8y    JK I, Vy          IF KEY Vy is pressed THEN jump to I
+    1167/     34A :                     ;                 JK Vy             VA contains keypad (0 key pad player 1, 1 keypad player 2)
+    1168/     34A : F8 02               		LDI  02H             ;034A: F8 02       
+    1169/     34C : BC                  		PHI  RC              ;034C: BC          
+    1170/     34D : F8 C9               		LDI  0C9H            ;034D: F8 C9       
+    1171/     34F : AC                  		PLO  RC              ;034F: AC          
+    1172/     350 : DC                  		SEP  RC              ;0350: DC          
+    1173/     351 : 3B 32               		BNF  R0332           ;0351: 3B 32       
+    1174/     353 : D4                  		SEP  R4              ;0353: D4       
+    1175/     354 :                     		
+    1176/     354 :                     ; Opcode: 5.9y    JNK I, Vy         IF KEY Vy not pressed THEN jump to I   
+    1177/     354 :                     ;                 JNK Vy            VA contains keypad (0 key pad player 1, 1 keypad player 2)
+    1178/     354 : F8 02               		LDI  02H             ;0354: F8 02       
+    1179/     356 : BC                  		PHI  RC              ;0356: BC          
+    1180/     357 : F8 C9               		LDI  0C9H            ;0357: F8 C9       
+    1181/     359 : AC                  		PLO  RC              ;0359: AC          
+    1182/     35A : DC                  		SEP  RC              ;035A: DC          
+    1183/     35B :                     S035B
+    1184/     35B : 33 32               		BDF  R0332           ;035B: 33 32       
+    1185/     35D : D4                  		SEP  R4              ;035D: D4          
+    1186/     35E : 00                  		DB   00H             ;035E: 00
+    1187/     35F : 00                  		DB   00H             ;035F: 00
+    1188/     360 :                     		
+    1189/     360 :                     ; Opcode: 5.0.    SYS I             Call 1802 routine at address I, end routine with SEP R4
+    1190/     360 : F8 03               		LDI  03H             ;0360: F8 03       
+    1191/     362 : BC                  		PHI  RC              ;0362: BC          
+    1192/     363 : F8 67               		LDI  67H             ;0363: F8 67       
+    1193/     365 : AC                  		PLO  RC              ;0365: AC          
+    1194/     366 : DC                  		SEP  RC              ;0366: DC          
+    1195/     367 :                     S0367
+    1196/     367 : 9E                  		GHI  RE              ;0367: 9E          
+    1197/     368 : B3                  		PHI  R3              ;0368: B3          
+    1198/     369 : 8E                  		GLO  RE              ;0369: 8E          
+    1199/     36A : A3                  		PLO  R3              ;036A: A3          
+    1200/     36B : D3                  		SEP  R3              ;036B: D3          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 21 - 24/08/19 19:51:57
+
+
+    1201/     36C :                     
+    1202/     36C :                     ; Opcode: 5x5y    CLR Vx, Vy    	Store colour Vy (lowest 4 bit) in colour RAM
+    1203/     36C :                     ; 		   						    size: 8*4 (w*h)
+    1204/     36C :                     ;								    Repeat horizontal: Vx high nibble
+    1205/     36C :                     ;								    Repeat vertical: Vx+1 high nibble
+    1206/     36C :                     ; 								    Screen position: Vx, Vx+1 low nibble (16x16 positions)
+    1207/     36C : 07                  		LDN  R7              ;036C: 07          
+    1208/     36D : 30 70               		BR   R0370           ;036D: 30 70       
+    1209/     36F :                     		
+    1210/     36F :                     ; Opcode: 5x6c    CLR Vx, c         Store colour c in colour RAM
+    1211/     36F :                     ; 								    size: 8*4 (w*h)
+    1212/     36F :                     ;								    Repeat horizontal: Vx high nibble
+    1213/     36F :                     ;								    Repeat vertical: Vx+1 high nibble
+    1214/     36F :                     ; 								    Screen position: Vx, Vx+1 low nibble (16x16 positions)
+    1215/     36F : 8F                  		GLO  RF              ;036F: 8F          
+    1216/     370 :                     R0370
+    1217/     370 : F9 F0               		ORI  0F0H            ;0370: F9 F0       
+    1218/     372 : 30 75               		BR   R0375           ;0372: 30 75 
+    1219/     374 :                     		
+    1220/     374 :                     ; Opcode: 5x7.    DRWR I, Vx        Draw pattern from [I] on screen and repeat the same pattern
+    1221/     374 :                     ; 								    size: 8*4 (w*h)
+    1222/     374 :                     ;								    Repeat horizontal: Vx high nibble
+    1223/     374 :                     ;								    Repeat vertical: Vx+1 high nibble
+    1224/     374 :                     ; 								    Screen position: Vx, Vx+1 low nibble (16x16 positions)
+    1225/     374 :                     ; Opcode: 5x2.    DRW I, Vx         Draw patterns from [I] on screen
+    1226/     374 :                     ; 								    size: 8*4 (w*h)
+    1227/     374 :                     ;								    Repeat horizontal: Vx high nibble
+    1228/     374 :                     ;								    Repeat vertical: Vx+1 high nibble
+    1229/     374 :                     ; 								    Screen position: Vx, Vx+1 low nibble (16x16 positions)
+    1230/     374 : 94                  		GHI  R4              ;0374: 94          
+    1231/     375 :                     R0375
+    1232/     375 : BD                  		PHI  RD              ;0375: BD          
+    1233/     376 : F8 F0               		LDI  0F0H            ;0376: F8 F0       
+    1234/     378 : A7                  		PLO  R7              ;0378: A7          
+    1235/     379 : D7                  		SEP  R7              ;0379: D7          
+    1236/     37A :                     S037A
+    1237/     37A : 46                  		LDA  R6              ;037A: 46          
+    1238/     37B : AC                  		PLO  RC              ;037B: AC          
+    1239/     37C : 06                  		LDN  R6              ;037C: 06          
+    1240/     37D : BC                  		PHI  RC              ;037D: BC          
+    1241/     37E : 8C                  		GLO  RC              ;037E: 8C          
+    1242/     37F : FA 0F               		ANI  0FH             ;037F: FA 0F       
+    1243/     381 : 22                  		DEC  R2              ;0381: 22          
+    1244/     382 : 52                  		STR  R2              ;0382: 52          
+    1245/     383 : E2                  		SEX  R2              ;0383: E2          
+    1246/     384 : F8 20               		LDI  20H             ;0384: F8 20       
+    1247/     386 : A6                  		PLO  R6              ;0386: A6          
+    1248/     387 : 9D                  		GHI  RD              ;0387: 9D          
+    1249/     388 : 32 8D               		BZ   R038D           ;0388: 32 8D       
+    1250/     38A : F8 28               		LDI  28H             ;038A: F8 28       
+    1251/     38C : A6                  		PLO  R6              ;038C: A6          
+    1252/     38D :                     R038D
+    1253/     38D : 9C                  		GHI  RC              ;038D: 9C          
+    1254/     38E : F6                  		SHR                  ;038E: F6          
+    1255/     38F : F6                  		SHR                  ;038F: F6          
+    1256/     390 : F6                  		SHR                  ;0390: F6          
+    1257/     391 : F6                  		SHR                  ;0391: F6          
+    1258/     392 : AD                  		PLO  RD              ;0392: AD          
+    1259/     393 : 9C                  		GHI  RC              ;0393: 9C          
+    1260/     394 : FE                  		SHL                  ;0394: FE          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 22 - 24/08/19 19:51:57
+
+
+    1261/     395 : FE                  		SHL                  ;0395: FE          
+    1262/     396 : FE                  		SHL                  ;0396: FE          
+    1263/     397 : FE                  		SHL                  ;0397: FE          
+    1264/     398 : FE                  		SHL                  ;0398: FE          
+    1265/     399 : 3B 9D               		BNF  R039D           ;0399: 3B 9D       
+    1266/     39B : 16                  		INC  R6              ;039B: 16          
+    1267/     39C : 16                  		INC  R6              ;039C: 16          
+    1268/     39D :                     R039D
+    1269/     39D : FE                  		SHL                  ;039D: FE          
+    1270/     39E : 3B A1               		BNF  R03A1           ;039E: 3B A1       
+    1271/     3A0 : 16                  		INC  R6              ;03A0: 16          
+    1272/     3A1 :                     R03A1
+    1273/     3A1 : F4                  		ADD                  ;03A1: F4          
+    1274/     3A2 : BC                  		PHI  RC              ;03A2: BC          
+    1275/     3A3 : 86                  		GLO  R6              ;03A3: 86          
+    1276/     3A4 : B6                  		PHI  R6              ;03A4: B6          
+    1277/     3A5 : 9C                  		GHI  RC              ;03A5: 9C          
+    1278/     3A6 : A6                  		PLO  R6              ;03A6: A6          
+    1279/     3A7 : 8F                  		GLO  RF              ;03A7: 8F          
+    1280/     3A8 : FA 40               		ANI  40H             ;03A8: FA 40       
+    1281/     3AA : BF                  		PHI  RF              ;03AA: BF          
+    1282/     3AB : 8C                  		GLO  RC              ;03AB: 8C          
+    1283/     3AC : F6                  		SHR                  ;03AC: F6          
+    1284/     3AD : F6                  		SHR                  ;03AD: F6          
+    1285/     3AE : F6                  		SHR                  ;03AE: F6          
+    1286/     3AF : F6                  		SHR                  ;03AF: F6          
+    1287/     3B0 : AF                  		PLO  RF              ;03B0: AF          
+    1288/     3B1 :                     R03B1
+    1289/     3B1 : 96                  		GHI  R6              ;03B1: 96          
+    1290/     3B2 : B7                  		PHI  R7              ;03B2: B7          
+    1291/     3B3 : 86                  		GLO  R6              ;03B3: 86          
+    1292/     3B4 : A7                  		PLO  R7              ;03B4: A7          
+    1293/     3B5 : 8D                  		GLO  RD              ;03B5: 8D          
+    1294/     3B6 : BC                  		PHI  RC              ;03B6: BC          
+    1295/     3B7 :                     R03B7
+    1296/     3B7 : F8 04               		LDI  04H             ;03B7: F8 04       
+    1297/     3B9 : AC                  		PLO  RC              ;03B9: AC          
+    1298/     3BA :                     R03BA
+    1299/     3BA : 9D                  		GHI  RD              ;03BA: 9D          
+    1300/     3BB : 3A BE               		BNZ  R03BE           ;03BB: 3A BE       
+    1301/     3BD : 4E                  		LDA  RE              ;03BD: 4E          
+    1302/     3BE :                     R03BE
+    1303/     3BE : 57                  		STR  R7              ;03BE: 57          
+    1304/     3BF : 87                  		GLO  R7              ;03BF: 87          
+    1305/     3C0 : FC 10               		ADI  10H             ;03C0: FC 10       
+    1306/     3C2 : A7                  		PLO  R7              ;03C2: A7          
+    1307/     3C3 : 2C                  		DEC  RC              ;03C3: 2C          
+    1308/     3C4 : 8C                  		GLO  RC              ;03C4: 8C          
+    1309/     3C5 : 3A BA               		BNZ  R03BA           ;03C5: 3A BA       
+    1310/     3C7 : 97                  		GHI  R7              ;03C7: 97          
+    1311/     3C8 : 7C 00               		ADCI 00H             ;03C8: 7C 00       
+    1312/     3CA : FA 2B               		ANI  2BH             ;03CA: FA 2B       
+    1313/     3CC : B7                  		PHI  R7              ;03CC: B7          
+    1314/     3CD : 9F                  		GHI  RF              ;03CD: 9F          
+    1315/     3CE : 32 D4               		BZ   R03D4           ;03CE: 32 D4       
+    1316/     3D0 : 2E                  		DEC  RE              ;03D0: 2E          
+    1317/     3D1 : 2E                  		DEC  RE              ;03D1: 2E          
+    1318/     3D2 : 2E                  		DEC  RE              ;03D2: 2E          
+    1319/     3D3 : 2E                  		DEC  RE              ;03D3: 2E          
+    1320/     3D4 :                     R03D4
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 23 - 24/08/19 19:51:57
+
+
+    1321/     3D4 : 9C                  		GHI  RC              ;03D4: 9C          
+    1322/     3D5 : 32 DC               		BZ   R03DC           ;03D5: 32 DC       
+    1323/     3D7 : FF 01               		SMI  01H             ;03D7: FF 01       
+    1324/     3D9 : BC                  		PHI  RC              ;03D9: BC          
+    1325/     3DA : 30 B7               		BR   R03B7           ;03DA: 30 B7       
+    1326/     3DC :                     R03DC
+    1327/     3DC : 16                  		INC  R6              ;03DC: 16          
+    1328/     3DD : 86                  		GLO  R6              ;03DD: 86          
+    1329/     3DE : FA CF               		ANI  0CFH            ;03DE: FA CF       
+    1330/     3E0 : A6                  		PLO  R6              ;03E0: A6          
+    1331/     3E1 : 8F                  		GLO  RF              ;03E1: 8F          
+    1332/     3E2 : 32 E7               		BZ   R03E7           ;03E2: 32 E7       
+    1333/     3E4 : 2F                  		DEC  RF              ;03E4: 2F          
+    1334/     3E5 : 30 B1               		BR   R03B1           ;03E5: 30 B1       
+    1335/     3E7 :                     R03E7
+    1336/     3E7 : 12                  		INC  R2              ;03E7: 12          
+    1337/     3E8 : D4                  		SEP  R4              ;03E8: D4          
+    1338/     3E9 : 00                  		DB   00H             ;03E9: 00
+    1339/     3EA : 00                  		DB   00H             ;03EA: 00
+    1340/     3EB :                     		
+    1341/     3EB :                     ; Opcode: Axkk    JE I, Vx, kk      Jump to I if Vx = kk
+    1342/     3EB :                     S03EB
+    1343/     3EB : E6                  		SEX  R6              ;03EB: E6          
+    1344/     3EC : 8F                  		GLO  RF              ;03EC: 8F          
+    1345/     3ED : F3                  		XOR                  ;03ED: F3          
+    1346/     3EE : 32 32               		BZ   R0332           ;03EE: 32 32       
+    1347/     3F0 : D4                  		SEP  R4              ;03F0: D4   
+    1348/     3F1 :                     		
+    1349/     3F1 :                     ; Opcode: Bxkk    JNE I, Vx, kk     Jump to I if Vx != kk
+    1350/     3F1 :                     ;				  JNE Vx, kk
+    1351/     3F1 :                     S03F1
+    1352/     3F1 : E6                  		SEX  R6              ;03F1: E6          
+    1353/     3F2 : 8F                  		GLO  RF              ;03F2: 8F          
+    1354/     3F3 : F3                  		XOR                  ;03F3: F3          
+    1355/     3F4 : 3A 32               		BNZ  R0332           ;03F4: 3A 32       
+    1356/     3F6 : D4                  		SEP  R4              ;03F6: D4          
+    1357/     3F7 : 00                  		DB   00H             ;03F7: 00
+    1358/     3F8 :                     		
+    1359/     3F8 :                     ; Opcode: 5xFy    LD Vx, [Vy]  	  Vx=[VyV(y+1)]
+    1360/     3F8 : 47                  		LDA  R7              ;03F8: 47          
+    1361/     3F9 : BE                  		PHI  RE              ;03F9: BE          
+    1362/     3FA : 07                  		LDN  R7              ;03FA: 07          
+    1363/     3FB : AE                  		PLO  RE              ;03FB: AE          
+    1364/     3FC : 0E                  		LDN  RE              ;03FC: 0E          
+    1365/     3FD : 56                  		STR  R6              ;03FD: 56          
+    1366/     3FE : D4                  		SEP  R4              ;03FE: D4          
+    1367/     3FF : 00                  		DB   00H             ;03FF: 00
+    1368/     400 :                     		
+    1369/     400 :                     ; Opcode: 6n.. Start routine, jump table on 00C0, jump on n.
+    1370/     400 :                     OPCODE6
+    1371/     400 : 9F                  		GHI  RF              ;0400: 9F          
+    1372/     401 : F9 C0               		ORI  0C0H            ;0401: F9 C0       
+    1373/     403 : AC                  		PLO  RC              ;0403: AC          
+    1374/     404 : 0C                  		LDN  RC              ;0404: 0C          
+    1375/     405 : A3                  		PLO  R3              ;0405: A3   
+    1376/     406 :                     
+    1377/     406 :                     ; Opcode: 62kk    ADD I, kk         Add kk to Low byte of I; no carry to high byte is done
+    1378/     406 : F8 F7               		LDI  0F7H            ;0406: F8 F7       
+    1379/     408 : A6                  		PLO  R6              ;0408: A6          
+    1380/     409 : E6                  		SEX  R6              ;0409: E6          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 24 - 24/08/19 19:51:57
+
+
+    1381/     40A : 8F                  		GLO  RF              ;040A: 8F          
+    1382/     40B : F4                  		ADD                  ;040B: F4          
+    1383/     40C : 56                  		STR  R6              ;040C: 56          
+    1384/     40D : D4                  		SEP  R4              ;040D: D4   
+    1385/     40E :                     		
+    1386/     40E :                     ; Opcode: 63kk    LD I, [27kk]      LD I with high byte from [27kk] and low byte from [27kk+1]
+    1387/     40E :                     ;         63Ey    LD I, Vy, Vy+1    LD I with high byte from Vy and low byte from Vy+1 
+    1388/     40E : F8 F6               		LDI  0F6H            ;040E: F8 F6       
+    1389/     410 : A7                  		PLO  R7              ;0410: A7          
+    1390/     411 : 8F                  		GLO  RF              ;0411: 8F          
+    1391/     412 : A6                  		PLO  R6              ;0412: A6          
+    1392/     413 :                     R0413
+    1393/     413 : 46                  		LDA  R6              ;0413: 46          
+    1394/     414 : 57                  		STR  R7              ;0414: 57          
+    1395/     415 : 17                  		INC  R7              ;0415: 17          
+    1396/     416 : 06                  		LDN  R6              ;0416: 06          
+    1397/     417 : 57                  		STR  R7              ;0417: 57          
+    1398/     418 : D4                  		SEP  R4              ;0418: D4   
+    1399/     419 :                     		
+    1400/     419 :                     ; Opcode: 64kk    LD [27kk], I      LD I high byte to [27kk] and low byte to [27kk+1]
+    1401/     419 :                     ;         64Ey    LD Vy, Vy+1, I    LD Vy with high byte from I and Vy+1 with low byte from I
+    1402/     419 : F8 F6               		LDI  0F6H            ;0419: F8 F6       
+    1403/     41B : A6                  		PLO  R6              ;041B: A6          
+    1404/     41C : 8F                  		GLO  RF              ;041C: 8F          
+    1405/     41D : A7                  		PLO  R7              ;041D: A7          
+    1406/     41E : 30 13               		BR   R0413           ;041E: 30 13       
+    1407/     420 :                     		
+    1408/     420 :                     ; Opcode: 65kk    JP kk             Jump to kk in same page 
+    1409/     420 : 8F                  		GLO  RF              ;0420: 8F          
+    1410/     421 : A5                  		PLO  R5              ;0421: A5          
+    1411/     422 : D4                  		SEP  R4              ;0422: D4          
+    1412/     423 : 00                  		DB   00H             ;0423: 00
+    1413/     424 : 63 00               		DB   63H, 00H  		 ;   0424: LD    I, [2700]     
+    1414/     426 : 50 D5               		DB   50H, 0D5H		 ;   0426: CP    [I], V0, V5   
+    1415/     428 : 62 06               		DB   62H, 06H		 ;   0428: ADD   I, 06         
+    1416/     42A : 50 54               		DB   50H, 54H		 ;   042A: CLR   V0, V4        
+    1417/     42C : 52 55               		DB   52H, 55H		 ;   042C: CLR   V2, V5        
+    1418/     42E : 45 94               		DB   45H, 94H		 ;   042E: SHR   V5, 4         
+    1419/     430 : 95 26               		DB   95H, 26H		 ;   0430: JNZ   V5, 26        
+    1420/     432 : 65 CE               		DB   65H, 0CEH		 ;   0432: JP    CE            
+    1421/     434 :                     		
+    1422/     434 :                     ; Opcode: 69kk    CALL I, kk        Call subroutine on I, V9=kk, return with 6B.. (RET)
+    1423/     434 : F8 E9               		LDI  0E9H            ;0434: F8 E9       
+    1424/     436 : A6                  		PLO  R6              ;0436: A6          
+    1425/     437 : 8F                  		GLO  RF              ;0437: 8F          
+    1426/     438 : 56                  		STR  R6              ;0438: 56          
+    1427/     439 : 22                  		DEC  R2              ;0439: 22          
+    1428/     43A : 85                  		GLO  R5              ;043A: 85          
+    1429/     43B : 52                  		STR  R2              ;043B: 52          
+    1430/     43C : 22                  		DEC  R2              ;043C: 22          
+    1431/     43D : 95                  		GHI  R5              ;043D: 95          
+    1432/     43E : 52                  		STR  R2              ;043E: 52          
+    1433/     43F : 9E                  		GHI  RE              ;043F: 9E          
+    1434/     440 : B5                  		PHI  R5              ;0440: B5          
+    1435/     441 : 8E                  		GLO  RE              ;0441: 8E          
+    1436/     442 : A5                  		PLO  R5              ;0442: A5          
+    1437/     443 : D4                  		SEP  R4              ;0443: D4
+    1438/     444 :                     		
+    1439/     444 :                     ; Opcode: 6B..    RET               Return from subrouting (any CALL)
+    1440/     444 : 42                  		LDA  R2              ;0444: 42          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 25 - 24/08/19 19:51:57
+
+
+    1441/     445 : B5                  		PHI  R5              ;0445: B5          
+    1442/     446 : 42                  		LDA  R2              ;0446: 42          
+    1443/     447 : A5                  		PLO  R5              ;0447: A5          
+    1444/     448 : D4                  		SEP  R4              ;0448: D4          
+    1445/     449 :                     		
+    1446/     449 :                     ; Opcode: 6A..    PUSH I            Store value I on stack
+    1447/     449 : 22                  		DEC  R2              ;0449: 22          
+    1448/     44A : 8E                  		GLO  RE              ;044A: 8E          
+    1449/     44B : 52                  		STR  R2              ;044B: 52          
+    1450/     44C : 22                  		DEC  R2              ;044C: 22          
+    1451/     44D : 9E                  		GHI  RE              ;044D: 9E          
+    1452/     44E : 52                  		STR  R2              ;044E: 52          
+    1453/     44F : D4                  		SEP  R4              ;044F: D4          
+    1454/     450 :                     		
+    1455/     450 :                     ; Opcode: 6C..    POP I             Load I from stack
+    1456/     450 : F8 F6               		LDI  0F6H            ;0450: F8 F6       
+    1457/     452 : A6                  		PLO  R6              ;0452: A6          
+    1458/     453 : 42                  		LDA  R2              ;0453: 42          
+    1459/     454 : 56                  		STR  R6              ;0454: 56          
+    1460/     455 : 16                  		INC  R6              ;0455: 16          
+    1461/     456 : 42                  		LDA  R2              ;0456: 42          
+    1462/     457 : 56                  		STR  R6              ;0457: 56          
+    1463/     458 : D4                  		SEP  R4              ;0458: D4          
+    1464/     459 : 00                  		DB   00H             ;0459: 00
+    1465/     45A :                     		
+    1466/     45A :                     ; Opcode: 6E.y    OUT4 Vy        	  OUT 4 with value Vx, 0x27F4 = Vx
+    1467/     45A : F8 F4               		LDI  0F4H            ;045A: F8 F4       
+    1468/     45C : A6                  		PLO  R6              ;045C: A6          
+    1469/     45D : E6                  		SEX  R6              ;045D: E6          
+    1470/     45E : 07                  		LDN  R7              ;045E: 07          
+    1471/     45F : 56                  		STR  R6              ;045F: 56          
+    1472/     460 : 64                  		OUT  4               ;0460: 64          
+    1473/     461 : D4                  		SEP  R4              ;0461: D4          
+    1474/     462 :                     		
+    1475/     462 :                     ; Opcode: 6Fkk    OUT4 kk           OUT 4 with value kk, 0x27F4 = kk
+    1476/     462 : F8 F4               		LDI  0F4H            ;0462: F8 F4       
+    1477/     464 : A6                  		PLO  R6              ;0464: A6          
+    1478/     465 : E6                  		SEX  R6              ;0465: E6          
+    1479/     466 : 8F                  		GLO  RF              ;0466: 8F          
+    1480/     467 : 56                  		STR  R6              ;0467: 56          
+    1481/     468 : 64                  		OUT  4               ;0468: 64          
+    1482/     469 : D4                  		SEP  R4              ;0469: D4    
+    1483/     46A :                     		
+    1484/     46A :                     ; Opcode: 60kk    CALL 10kk		  Call subroutine on 10kk, return with 6B.. (RET)
+    1485/     46A : F8 10               		LDI  10H             ;046A: F8 10       
+    1486/     46C : BF                  		PHI  RF              ;046C: BF          
+    1487/     46D :                     R046D
+    1488/     46D : 22                  		DEC  R2              ;046D: 22          
+    1489/     46E : 85                  		GLO  R5              ;046E: 85          
+    1490/     46F : 52                  		STR  R2              ;046F: 52          
+    1491/     470 : 22                  		DEC  R2              ;0470: 22          
+    1492/     471 : 95                  		GHI  R5              ;0471: 95          
+    1493/     472 : 52                  		STR  R2              ;0472: 52          
+    1494/     473 : 9F                  		GHI  RF              ;0473: 9F          
+    1495/     474 : B5                  		PHI  R5              ;0474: B5          
+    1496/     475 : 8F                  		GLO  RF              ;0475: 8F          
+    1497/     476 : A5                  		PLO  R5              ;0476: A5          
+    1498/     477 : D4                  		SEP  R4              ;0477: D4          
+    1499/     478 :                     		
+    1500/     478 :                     ; Opcode: 61kk    CALL 11kk		  Call subroutine on 11kk, return with 6B.. (RET) 
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 26 - 24/08/19 19:51:57
+
+
+    1501/     478 : F8 11               		LDI  11H             ;0478: F8 11       
+    1502/     47A : BF                  		PHI  RF              ;047A: BF          
+    1503/     47B : 30 6D               		BR   R046D           ;047B: 30 6D       
+    1504/     47D :                     		
+    1505/     47D :                     ; Opcode: 66kk    CALL 06kk       Call subroutine on 6kk, return with 6B.. (RET)
+    1506/     47D :                     ; Opcode: 67kk    CALL 07kk		  Call subroutine on 7kk, return with 6B.. (RET)
+    1507/     47D :                     ; Opcode: 68kk    CALL 08kk		  Call subroutine on 8kk, return with 6B.. (RET)  
+    1508/     47D : 30 6D               		BR   R046D           ;047D: 30 6D       
+    1509/     47F : 00                  		DB   00H             ;047F: 00
+    1510/     480 : 00                  		DB   00H             ;0480: 00
+    1511/     481 : D5                  		DB   0D5H            ;0481: D5
+    1512/     482 : BD                  		DB   0BDH            ;0482: BD
+    1513/     483 : A9                  		DB   0A9H            ;0483: A9
+    1514/     484 : 9F                  		DB   9FH             ;0484: 9F
+    1515/     485 : 96                  		DB   96H             ;0485: 96
+    1516/     486 : 8E                  		DB   8EH             ;0486: 8E
+    1517/     487 : 7E                  		DB   7EH             ;0487: 7E
+    1518/     488 : 77                  		DB   77H             ;0488: 77
+    1519/     489 : 70                  		DB   70H             ;0489: 70
+    1520/     48A : 6A                  		DB   6AH             ;048A: 6A
+    1521/     48B : 5E                  		DB   5EH             ;048B: 5E
+    1522/     48C : 54                  		DB   54H             ;048C: 54
+    1523/     48D : 4F                  		DB   4FH             ;048D: 4F
+    1524/     48E : 4B                  		DB   4BH             ;048E: 4B
+    1525/     48F : 46                  		DB   46H             ;048F: 46
+    1526/     490 : 00                  		DB   00H             ;0490: 00
+    1527/     491 : 02                  		DB   02H             ;0491: 02
+    1528/     492 : 03                  		DB   03H             ;0492: 03
+    1529/     493 : 04                  		DB   04H             ;0493: 04
+    1530/     494 : 06                  		DB   06H             ;0494: 06
+    1531/     495 : 08                  		DB   08H             ;0495: 08
+    1532/     496 : 0C                  		DB   0CH             ;0496: 0C
+    1533/     497 : 10                  		DB   10H             ;0497: 10
+    1534/     498 : 18                  		DB   18H             ;0498: 18
+    1535/     499 : 20                  		DB   20H             ;0499: 20
+    1536/     49A : 30                  		DB   30H             ;049A: 30
+    1537/     49B : 40                  		DB   40H             ;049B: 40
+    1538/     49C : 60                  		DB   60H             ;049C: 60
+    1539/     49D : 80                  		DB   80H             ;049D: 80
+    1540/     49E : C0                  		DB   0C0H            ;049E: C0
+    1541/     49F : FF                  		DB   0FFH            ;049F: FF
+    1542/     4A0 :                     		
+    1543/     4A0 :                     ; Opcode: 6D..    WAIT [I], kk	  WAIT with a value kk, using [I] towards a table on 049h and 048l where hl is
+    1544/     4A0 :                     ;                                 the byte on [I]
+    1545/     4A0 : F8 EC               		LDI  0ECH            ;04A0: F8 EC       
+    1546/     4A2 : A6                  		PLO  R6              ;04A2: A6          
+    1547/     4A3 : F8 ED               		LDI  0EDH            ;04A3: F8 ED       
+    1548/     4A5 : A7                  		PLO  R7              ;04A5: A7          
+    1549/     4A6 :                     R04A6
+    1550/     4A6 : 93                  		GHI  R3              ;04A6: 93          
+    1551/     4A7 : BC                  		PHI  RC              ;04A7: BC          
+    1552/     4A8 : 0E                  		LDN  RE              ;04A8: 0E          
+    1553/     4A9 : F6                  		SHR                  ;04A9: F6          
+    1554/     4AA : F6                  		SHR                  ;04AA: F6          
+    1555/     4AB : F6                  		SHR                  ;04AB: F6          
+    1556/     4AC : F6                  		SHR                  ;04AC: F6          
+    1557/     4AD : F9 90               		ORI  90H             ;04AD: F9 90       
+    1558/     4AF : AC                  		PLO  RC              ;04AF: AC          
+    1559/     4B0 : 0C                  		LDN  RC              ;04B0: 0C          
+    1560/     4B1 : BD                  		PHI  RD              ;04B1: BD          
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 27 - 24/08/19 19:51:57
+
+
+    1561/     4B2 : 4E                  		LDA  RE              ;04B2: 4E          
+    1562/     4B3 : FA 0F               		ANI  0FH             ;04B3: FA 0F       
+    1563/     4B5 : F9 80               		ORI  80H             ;04B5: F9 80       
+    1564/     4B7 : AC                  		PLO  RC              ;04B7: AC          
+    1565/     4B8 : 0C                  		LDN  RC              ;04B8: 0C          
+    1566/     4B9 : AD                  		PLO  RD              ;04B9: AD          
+    1567/     4BA : 8F                  		GLO  RF              ;04BA: 8F          
+    1568/     4BB : 3A BE               		BNZ  R04BE           ;04BB: 3A BE       
+    1569/     4BD : D4                  		SEP  R4              ;04BD: D4          
+    1570/     4BE :                     R04BE
+    1571/     4BE : 2F                  		DEC  RF              ;04BE: 2F          
+    1572/     4BF :                     R04BF
+    1573/     4BF : 07                  		LDN  R7              ;04BF: 07          
+    1574/     4C0 : 3A BF               		BNZ  R04BF           ;04C0: 3A BF       
+    1575/     4C2 : F8 80               		LDI  80H             ;04C2: F8 80       
+    1576/     4C4 :                     R04C4
+    1577/     4C4 : FF 01               		SMI  01H             ;04C4: FF 01       
+    1578/     4C6 : 3A C4               		BNZ  R04C4           ;04C6: 3A C4       
+    1579/     4C8 : 9D                  		GHI  RD              ;04C8: 9D          
+    1580/     4C9 : 57                  		STR  R7              ;04C9: 57          
+    1581/     4CA : 8D                  		GLO  RD              ;04CA: 8D          
+    1582/     4CB : 56                  		STR  R6              ;04CB: 56          
+    1583/     4CC : 30 A6               		BR   R04A6           ;04CC: 30 A6       
+    1584/     4CE : 6A 00               		DB   6AH, 00H		 ;   04CE: PUSH  I             
+    1585/     4D0 : 66 0A               		DB   66H, 0AH		 ;   04D0: POP   V0-V9         
+    1586/     4D2 : 6B 00               		DB   6BH, 00H		 ;   04D2: RET                 
+    1587/     4D4 : 63 00               		DB   63H, 00H		 ;   04D4: LD    I, [2700]     
+    1588/     4D6 : 64 E2               		DB   64H, 0E2H		 ;   04D6: LD    V2, V3, I     
+    1589/     4D8 : 63 0E               		DB   63H, 0EH		 ;   04D8: LD    I, [270E]     
+    1590/     4DA : 56 F2               		DB   56H, 0F2H		 ;   04DA: LD    V6, [V2]      
+    1591/     4DC : 56 C6               		DB   56H, 0C6H		 ;   04DC: CP    V6, V6, [I]   
+    1592/     4DE : 73 01               		DB   73H, 01H		 ;   04DE: ADD   V3, 01        
+    1593/     4E0 : 62 01               		DB   62H, 01H		 ;   04E0: ADD   I, 01         
+    1594/     4E2 : 79 FF               		DB   79H, 0FFH		 ;   04E2: ADD   V9, FF        
+    1595/     4E4 : 99 DA               		DB   99H, 0DAH		 ;   04E4: JNZ   V9, DA        
+    1596/     4E6 : 64 00               		DB   64H, 00H		 ;   04E6: LD    [2700], I     
+    1597/     4E8 : 63 E2               		DB   63H, 0E2H		 ;   04E8: LD    I, V2, V3     
+    1598/     4EA : 65 CE               		DB   65H, 0CEH		 ;   04EA: JP    CE            
+    1599/     4EC : F9 0F               		DB   0F9H, 0FH		 ;   04EC: LD    V9, 0F        
+    1600/     4EE : F6 00               		DB   0F6H, 00H		 ;   04EE: LD    V6, 00        
+    1601/     4F0 :                     
+    1602/     4F0 :                     ; 04F0-04FD Studio IV Psuedo code, Initialize registers and continue on 05DE
+    1603/     4F0 : FA 00               		DB   0FAH, 00H		 ;   04F0: LD    VA, 00        
+    1604/     4F2 : F0 70               		DB   0F0H, 70H		 ;   04F2: LD    V0, 70        
+    1605/     4F4 : F1 70               		DB   0F1H, 70H		 ;   04F4: LD    V1, 70        
+    1606/     4F6 : F7 02               		DB   0F7H, 02H		 ;   04F6: LD    V7, 02        
+    1607/     4F8 : F8 FD               		DB   0F8H, 0FDH		 ;   04F8: LD    V8, FD        
+    1608/     4FA : 05 DE               		DB   05H, 0DEH		 ;   04FA: LD    I, 05DE       
+    1609/     4FC : 4B BB               		DB   4BH, 0BBH		 ;   04FC: JP    I             
+    1610/     4FE : 00                  		DB   00H             ;04FE: 00
+    1611/     4FF : 00                  		DB   00H             ;04FF: 00
+    1612/     500 :                     		
+    1613/     500 :                     ;Character set address table
+    1614/     500 : A7                  		DB   0A7H            ;0500: A7 - 0 05A7
+    1615/     501 : 39                  		DB   39H             ;0501: 39 - 1 0539
+    1616/     502 : 44                  		DB   44H             ;0502: 44 - 2 0544
+    1617/     503 : AB                  		DB   0ABH            ;0503: AB - 3 05AB
+    1618/     504 : 85                  		DB   85H             ;0504: 85 - 4 0585
+    1619/     505 : AF                  		DB   0AFH            ;0505: AF - 5
+    1620/     506 : 46                  		DB   46H             ;0506: 46 - 6
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 28 - 24/08/19 19:51:57
+
+
+    1621/     507 : 96                  		DB   96H             ;0507: 96 - 7
+    1622/     508 : 48                  		DB   48H             ;0508: 48 - 8
+    1623/     509 : 42                  		DB   42H             ;0509: 42 - 9
+    1624/     50A : 4A                  		DB   4AH             ;050A: 4A - A
+    1625/     50B : B7                  		DB   0B7H            ;050B: B7 - B
+    1626/     50C : 8E                  		DB   8EH             ;050C: 8E - C
+    1627/     50D : BB                  		DB   0BBH            ;050D: BB - D 
+    1628/     50E : 92                  		DB   92H             ;050E: 92 - E 
+    1629/     50F : BF                  		DB   0BFH            ;050F: BF - F 
+    1630/     510 : 3E                  		DB   3EH             ;0510: 3E - G 
+    1631/     511 : 55                  		DB   55H             ;0511: 55 - H
+    1632/     512 : A3                  		DB   0A3H            ;0512: A3 - I 
+    1633/     513 : 98                  		DB   98H             ;0513: 98 - J 
+    1634/     514 : 30                  		DB   30H             ;0514: 30 - K
+    1635/     515 : 9F                  		DB   9FH             ;0515: 9F - L 
+    1636/     516 : 52                  		DB   52H             ;0516: 52 - M 
+    1637/     517 : C4                  		DB   0C4H            ;0517: C4 - N 
+    1638/     518 : A7                  		DB   0A7H            ;0518: A7 - O 
+    1639/     519 : 9C                  		DB   9CH             ;0519: 9C - P 
+    1640/     51A : C9                  		DB   0C9H            ;051A: C9 - Q
+    1641/     51B : CE                  		DB   0CEH            ;051B: CE - R 
+    1642/     51C : AF                  		DB   0AFH            ;051C: AF - S 
+    1643/     51D : 68                  		DB   68H             ;051D: 68 - T 
+    1644/     51E : 4D                  		DB   4DH             ;051E: 4D - U 
+    1645/     51F : 5D                  		DB   5DH             ;051F: 5D - V 
+    1646/     520 : 58                  		DB   58H             ;0520: 58 - W 
+    1647/     521 : 5F                  		DB   5FH             ;0521: 5F - X 
+    1648/     522 : 63                  		DB   63H             ;0522: 63 - Y 
+    1649/     523 : B3                  		DB   0B3H            ;0523: B3 - Z 
+    1650/     524 : 35                  		DB   35H             ;0524: 35 - ?
+    1651/     525 : 6A                  		DB   6AH             ;0525: 6A - !
+    1652/     526 : 80                  		DB   80H             ;0526: 80 - @
+    1653/     527 : 78                  		DB   78H             ;0527: 78 - - 
+    1654/     528 : 66                  		DB   66H             ;0528: 66 - +
+    1655/     529 : 70                  		DB   70H             ;0529: 70 - divide 
+    1656/     52A : 6D                  		DB   6DH             ;052A: 6D - : 
+    1657/     52B : D3                  		DB   0D3H            ;052B: D3 - /
+    1658/     52C : 8A                  		DB   8AH             ;052C: 8A - $
+    1659/     52D : 7C                  		DB   7CH             ;052D: 7C - =
+    1660/     52E : D8                  		DB   0D8H            ;052E: D8 - #
+    1661/     52F : 75                  		DB   75H             ;052F: 75 - space
+    1662/     530 :                     
+    1663/     530 :                     ; Character set 0530-05dC
+    1664/     530 : 88                  		DB   88H             ;0530: 88 X...X    K
+    1665/     531 : 90                  		DB   90H             ;0531: 90 X..X.
+    1666/     532 : E0                  		DB   0E0H            ;0532: E0 XXX..
+    1667/     533 : 90                  		DB   90H             ;0533: 90 X..X.
+    1668/     534 : 88                  		DB   88H             ;0534: 88 X...X
+    1669/     535 : 70                  		DB   70H             ;0535: 70 .XXX.    ?
+    1670/     536 : 88                  		DB   88H             ;0536: 88 X...X
+    1671/     537 : 10                  		DB   10H             ;0537: 10 ...X.
+    1672/     538 : 20                  		DB   20H             ;0538: 20 ..X..
+    1673/     539 : 20                  		DB   20H             ;0539: 20 ..X..    1
+    1674/     53A : 60                  		DB   60H             ;053A: 60 .XX..
+    1675/     53B : 20                  		DB   20H             ;053B: 20 ..X..
+    1676/     53C : 20                  		DB   20H             ;053C: 20 ..X..
+    1677/     53D : 70                  		DB   70H             ;053D: 70 .XXX.
+    1678/     53E : F8                  		DB   0F8H            ;053E: F8 XXXXX    G
+    1679/     53F : 80                  		DB   80H             ;053F: 80 X....
+    1680/     540 : 98                  		DB   98H             ;0540: 98 X..XX
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 29 - 24/08/19 19:51:57
+
+
+    1681/     541 : 88                  		DB   88H             ;0541: 88 X...X
+    1682/     542 : F8                  		DB   0F8H            ;0542: F8 XXXXX    9
+    1683/     543 : 88                  		DB   88H             ;0543: 88 X...X
+    1684/     544 : F8                  		DB   0F8H            ;0544: F8 XXXXX    2
+    1685/     545 : 08                  		DB   08H             ;0545: 08 ....X
+    1686/     546 : F8                  		DB   0F8H            ;0546: F8 XXXXX    6
+    1687/     547 : 80                  		DB   80H             ;0547: 80 X....
+    1688/     548 : F8                  		DB   0F8H            ;0548: F8 XXXXX    8
+    1689/     549 : 88                  		DB   88H             ;0549: 88 X...X
+    1690/     54A : F8                  		DB   0F8H            ;054A: F8 XXXXX    A
+    1691/     54B : 88                  		DB   88H             ;054B: 88 X...X
+    1692/     54C : F8                  		DB   0F8H            ;054C: F8 XXXXX
+    1693/     54D : 88                  		DB   88H             ;054D: 88 X...X    U
+    1694/     54E : 88                  		DB   88H             ;054E: 88 X...X
+    1695/     54F : 88                  		DB   88H             ;054F: 88 X...X
+    1696/     550 : 88                  		DB   88H             ;0550: 88 X...X
+    1697/     551 : F8                  		DB   0F8H            ;0551: F8 XXXXX
+    1698/     552 : D8                  		DB   0D8H            ;0552: D8 XX.XX    M
+    1699/     553 : F8                  		DB   0F8H            ;0553: F8 XXXXX
+    1700/     554 : A8                  		DB   0A8H            ;0554: A8 X.X.X
+    1701/     555 : 88                  		DB   88H             ;0555: 88 X...X    H
+    1702/     556 : 88                  		DB   88H             ;0556: 88 X...X
+    1703/     557 : F8                  		DB   0F8H            ;0557: F8 XXXXX
+    1704/     558 : 88                  		DB   88H             ;0558: 88 X...X    W
+    1705/     559 : 88                  		DB   88H             ;0559: 88 X...X
+    1706/     55A : A8                  		DB   0A8H            ;055A: A8 X.X.X
+    1707/     55B : F8                  		DB   0F8H            ;055B: F8 XXXXX
+    1708/     55C : D8                  		DB   0D8H            ;055C: D8 XX.XX
+    1709/     55D : 88                  		DB   88H             ;055D: 88 X...X    V
+    1710/     55E : 88                  		DB   88H             ;055E: 88 X...X
+    1711/     55F : 88                  		DB   88H             ;055F: 88 X...X    X
+    1712/     560 : 50                  		DB   50H             ;0560: 50 .X.X.
+    1713/     561 : 20                  		DB   20H             ;0561: 20 ..X..
+    1714/     562 : 50                  		DB   50H             ;0562: 50 .X.X.
+    1715/     563 : 88                  		DB   88H             ;0563: 88 X...X    Y
+    1716/     564 : 88                  		DB   88H             ;0564: 88 X...X
+    1717/     565 : F8                  		DB   0F8H            ;0565: F8 XXXXX
+    1718/     566 : 20                  		DB   20H             ;0566: 20 ..X..    +
+    1719/     567 : 20                  		DB   20H             ;0567: 20 ..X..
+    1720/     568 : F8                  		DB   0F8H            ;0568: F8 XXXXX    T
+    1721/     569 : 20                  		DB   20H             ;0569: 20 ..X..
+    1722/     56A : 20                  		DB   20H             ;056A: 20 ..X..    !
+    1723/     56B : 20                  		DB   20H             ;056B: 20 ..X..
+    1724/     56C : 20                  		DB   20H             ;056C: 20 ..X..
+    1725/     56D : 00                  		DB   00H             ;056D: 00 .....    :
+    1726/     56E : 20                  		DB   20H             ;056E: 20 ..X..
+    1727/     56F : 00                  		DB   00H             ;056F: 00 .....
+    1728/     570 : 20                  		DB   20H             ;0570: 20 ..X..    divide
+    1729/     571 : 00                  		DB   00H             ;0571: 00 .....
+    1730/     572 : F8                  		DB   0F8H            ;0572: F8 XXXXX
+    1731/     573 : 00                  		DB   00H             ;0573: 00 .....
+    1732/     574 : 20                  		DB   20H             ;0574: 20 ..X..    '
+    1733/     575 : 00                  		DB   00H             ;0575: 00 .....    space
+    1734/     576 : 00                  		DB   00H             ;0576: 00 .....
+    1735/     577 : 00                  		DB   00H             ;0577: 00 .....
+    1736/     578 : 00                  		DB   00H             ;0578: 00 .....    -
+    1737/     579 : 00                  		DB   00H             ;0579: 00 .....
+    1738/     57A : F8                  		DB   0F8H            ;057A: F8 XXXXX
+    1739/     57B : 00                  		DB   00H             ;057B: 00 .....
+    1740/     57C : 00                  		DB   00H             ;057C: 00 .....    =
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 30 - 24/08/19 19:51:57
+
+
+    1741/     57D : F8                  		DB   0F8H            ;057D: F8 XXXXX
+    1742/     57E : 00                  		DB   00H             ;057E: 00 .....
+    1743/     57F : F8                  		DB   0F8H            ;057F: F8 XXXXX
+    1744/     580 : 00                  		DB   00H             ;0580: 00 .....    @
+    1745/     581 : 70                  		DB   70H             ;0581: 70 .XXX.
+    1746/     582 : 70                  		DB   70H             ;0582: 70 .XXX.
+    1747/     583 : 70                  		DB   70H             ;0583: 70 .XXX.
+    1748/     584 : 00                  		DB   00H             ;0584: 00 .....
+    1749/     585 : 10                  		DB   10H             ;0585: 10 ...X.    4
+    1750/     586 : 90                  		DB   90H             ;0586: 90 X..X.
+    1751/     587 : F8                  		DB   0F8H            ;0587: F8 XXXXX
+    1752/     588 : 10                  		DB   10H             ;0588: 10 ...X.
+    1753/     589 : 10                  		DB   10H             ;0589: 10 ...X.
+    1754/     58A : F8                  		DB   0F8H            ;058A: F8 XXXXX    $
+    1755/     58B : A0                  		DB   0A0H            ;058B: A0 X.X..
+    1756/     58C : F8                  		DB   0F8H            ;058C: F8 XXXXX
+    1757/     58D : 28                  		DB   28H             ;058D: 28 ..X.X
+    1758/     58E : F8                  		DB   0F8H            ;058E: F8 XXXXX    C
+    1759/     58F : 80                  		DB   80H             ;058F: 80 X....
+    1760/     590 : 80                  		DB   80H             ;0590: 80 X....
+    1761/     591 : 80                  		DB   80H             ;0591: 80 X....
+    1762/     592 : F8                  		DB   0F8H            ;0592: F8 XXXXX    E
+    1763/     593 : 80                  		DB   80H             ;0593: 80 X....
+    1764/     594 : F0                  		DB   0F0H            ;0594: F0 XXXX.
+    1765/     595 : 80                  		DB   80H             ;0595: 80 X....
+    1766/     596 : F8                  		DB   0F8H            ;0596: F8 XXXXX    7
+    1767/     597 : 08                  		DB   08H             ;0597: 08 ....X
+    1768/     598 : 08                  		DB   08H             ;0598: 08 ....X    J
+    1769/     599 : 08                  		DB   08H             ;0599: 08 ....X
+    1770/     59A : 08                  		DB   08H             ;059A: 08 ....X
+    1771/     59B : 88                  		DB   88H             ;059B: 88 X...X
+    1772/     59C : F8                  		DB   0F8H            ;059C: F8 XXXXX    P
+    1773/     59D : 88                  		DB   88H             ;059D: 88 X...X
+    1774/     59E : F8                  		DB   0F8H            ;059E: F8 XXXXX
+    1775/     59F : 80                  		DB   80H             ;059F: 80 X....    L
+    1776/     5A0 : 80                  		DB   80H             ;05A0: 80 X....
+    1777/     5A1 : 80                  		DB   80H             ;05A1: 80 X....
+    1778/     5A2 : 80                  		DB   80H             ;05A2: 80 X....
+    1779/     5A3 : F8                  		DB   0F8H            ;05A3: F8 XXXXX    I
+    1780/     5A4 : 20                  		DB   20H             ;05A4: 20 ..X..
+    1781/     5A5 : 20                  		DB   20H             ;05A5: 20 ..X..
+    1782/     5A6 : 20                  		DB   20H             ;05A6: 20 ..X..
+    1783/     5A7 : F8                  		DB   0F8H            ;05A7: F8 XXXXX    O / 0
+    1784/     5A8 : 88                  		DB   88H             ;05A8: 88 X...X
+    1785/     5A9 : 88                  		DB   88H             ;05A9: 88 X...X
+    1786/     5AA : 88                  		DB   88H             ;05AA: 88 X...X
+    1787/     5AB : F8                  		DB   0F8H            ;05AB: F8 XXXXX    3
+    1788/     5AC : 08                  		DB   08H             ;05AC: 08 ....X
+    1789/     5AD : 38                  		DB   38H             ;05AD: 38 ..XXX
+    1790/     5AE : 08                  		DB   08H             ;05AE: 08 ....X
+    1791/     5AF : F8                  		DB   0F8H            ;05AF: F8 XXXXX    S / 5
+    1792/     5B0 : 80                  		DB   80H             ;05B0: 80 X....
+    1793/     5B1 : F8                  		DB   0F8H            ;05B1: F8 XXXXX
+    1794/     5B2 : 08                  		DB   08H             ;05B2: 08 ....X
+    1795/     5B3 : F8                  		DB   0F8H            ;05B3: F8 XXXXX    Z
+    1796/     5B4 : 10                  		DB   10H             ;05B4: 10 ...X.
+    1797/     5B5 : 20                  		DB   20H             ;05B5: 20 ..X..
+    1798/     5B6 : 40                  		DB   40H             ;05B6: 40 .X...
+    1799/     5B7 : F8                  		DB   0F8H            ;05B7: F8 XXXXX    B
+    1800/     5B8 : 48                  		DB   48H             ;05B8: 48 .X..X
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 31 - 24/08/19 19:51:57
+
+
+    1801/     5B9 : 78                  		DB   78H             ;05B9: 78 .XXXX
+    1802/     5BA : 48                  		DB   48H             ;05BA: 48 .X..X
+    1803/     5BB : F8                  		DB   0F8H            ;05BB: F8 XXXXX    D
+    1804/     5BC : 48                  		DB   48H             ;05BC: 48 .X..X
+    1805/     5BD : 48                  		DB   48H             ;05BD: 48 .X..X
+    1806/     5BE : 48                  		DB   48H             ;05BE: 48 .X..X
+    1807/     5BF : F8                  		DB   0F8H            ;05BF: F8 XXXXX    F
+    1808/     5C0 : 80                  		DB   80H             ;05C0: 80 X....
+    1809/     5C1 : F0                  		DB   0F0H            ;05C1: F0 XXXX.
+    1810/     5C2 : 80                  		DB   80H             ;05C2: 80 X....
+    1811/     5C3 : 80                  		DB   80H             ;05C3: 80 X....
+    1812/     5C4 : C8                  		DB   0C8H            ;05C4: C8 XX..X    N
+    1813/     5C5 : C8                  		DB   0C8H            ;05C5: C8 XX..X
+    1814/     5C6 : A8                  		DB   0A8H            ;05C6: A8 X.X.X
+    1815/     5C7 : 98                  		DB   98H             ;05C7: 98 X..XX
+    1816/     5C8 : 98                  		DB   98H             ;05C8: 98 X..XX
+    1817/     5C9 : 70                  		DB   70H             ;05C9: 70 .XXX.    Q
+    1818/     5CA : 88                  		DB   88H             ;05CA: 88 X...X
+    1819/     5CB : 88                  		DB   88H             ;05CB: 88 X...X
+    1820/     5CC : 98                  		DB   98H             ;05CC: 98 X..XX
+    1821/     5CD : 78                  		DB   78H             ;05CD: 78 .XXX.
+    1822/     5CE : F8                  		DB   0F8H            ;05CE: F8 XXXXX    R
+    1823/     5CF : 88                  		DB   88H             ;05CF: 88 X...X
+    1824/     5D0 : F8                  		DB   0F8H            ;05D0: F8 XXXXX
+    1825/     5D1 : 90                  		DB   90H             ;05D1: 90 X..X.
+    1826/     5D2 : 88                  		DB   88H             ;05D2: 88 X...X
+    1827/     5D3 : 08                  		DB   08H             ;05D3: 08 ....X    /
+    1828/     5D4 : 10                  		DB   10H             ;05D4: 10 ...X.
+    1829/     5D5 : 20                  		DB   20H             ;05D5: 20 ..X..
+    1830/     5D6 : 40                  		DB   40H             ;05D6: 40 .X...
+    1831/     5D7 : 80                  		DB   80H             ;05D7: 80 X....
+    1832/     5D8 : 50                  		DB   50H             ;05D8: 50 .X.X.    #
+    1833/     5D9 : F8                  		DB   0F8H            ;05D9: F8 XXXXX
+    1834/     5DA : 50                  		DB   50H             ;05DA: 50 .X.X.
+    1835/     5DB : F8                  		DB   0F8H            ;05DB: F8 XXXXX
+    1836/     5DC : 50                  		DB   50H             ;05DC: 50 .X.X.
+    1837/     5DD :                     
+    1838/     5DD : 00                  		DB 	 00H
+    1839/     5DE :                     		
+    1840/     5DE :                     ; 05DE-05FB Check on presence of cartridges on 0800 or 1000
+    1841/     5DE : 99 F4               		DB   99H, 0F4H		 ;   05DE: JNZ   V9, F4        
+    1842/     5E0 : 66 9A               		DB   66H, 9AH		 ;   05E0: CALL  69A           
+    1843/     5E2 : 10 00               		DB   10H, 00H		 ;   05E2: LD    I, 1000       
+    1844/     5E4 : 55 D5               		DB   55H, 0D5H		 ;   05E4: CP    [I], V5, V5   
+    1845/     5E6 : 10 02               		DB   10H, 02H		 ;   05E6: LD    I, 1002       
+    1846/     5E8 : A5 AA               		DB   0A5H, 0AAH		 ;   05E8: JE    I, V5, AA     
+    1847/     5EA : 08 00               		DB   08H, 00H		 ;   05EA: LD    I, 0800       
+    1848/     5EC : 55 D5               		DB   55H, 0D5H		 ;   05EC: CP    [I], V5, V5   
+    1849/     5EE : 08 02               		DB   08H, 02H		 ;   05EE: LD    I, 0802       
+    1850/     5F0 : A5 AA               		DB   0A5H, 0AAH		 ;   05F0: JE    I, V5, AA     
+    1851/     5F2 : 65 DE               		DB   65H, 0DEH		 ;   05F2: JP    DE            
+    1852/     5F4 : 9F E2               		DB   9FH, 0E2H		 ;   05F4: JNZ   VF, E2        
+    1853/     5F6 : 79 FF               		DB   79H, 0FFH		 ;   05F6: ADD   V9, FF        
+    1854/     5F8 : FF FF               		DB   0FFH, 0FFH		 ;   05F8: LD    VF, FF        
+    1855/     5FA : 65 E2               		DB   65H, 0E2H		 ;   05FA: JP    E2    
+    1856/     5FC :                     
+    1857/     5FC :                     ; 05FC-05FF 'FILL' character, used to fill the screen with FF during the demo        
+    1858/     5FC : FF                  		DB   0FFH            ;05FC: FF
+    1859/     5FD : FF                  		DB   0FFH            ;05FD: FF
+    1860/     5FE : FF                  		DB   0FFH            ;05FE: FF
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 32 - 24/08/19 19:51:57
+
+
+    1861/     5FF : FF                  		DB   0FFH            ;05FF: FF
+    1862/     600 :                     		
+    1863/     600 :                     ; 0600-0609 PUSH V0-V9
+    1864/     600 :                     ;			Save V0 to V9 on 2702-270B
+    1865/     600 : 64 00               		DB   64H, 00H		 ;   0600: LD    [2700], I     
+    1866/     602 : 27 02               		DB   27H, 02H		 ;   0602: LD    I, 2702       
+    1867/     604 : 50 C9               		DB   50H, 0C9H		 ;   0604: CP    V0, V9, [I]   
+    1868/     606 : 63 00               		DB   63H, 00H		 ;   0606: LD    I, [2700]     
+    1869/     608 : 6B 00               		DB   6BH, 00H		 ;   0608: RET                 
+    1870/     60A :                     
+    1871/     60A :                     ; 060A-0611 POP V0-V9
+    1872/     60A :                     ;			Load V0 to V9 from 2702-270B
+    1873/     60A : 64 00               		DB   64H, 00H		 ;   060A: LD    [2700], I     
+    1874/     60C : 27 02               		DB   27H, 02H		 ;   060C: LD    I, 2702       
+    1875/     60E : 50 D9               		DB   50H, 0D9H		 ;   060E: CP    [I], V0, V9   
+    1876/     610 : 65 06               		DB   65H, 06H		 ;   0610: JP    06            
+    1877/     612 :                     		
+    1878/     612 :                     ; 0612-0625 SCR CLS or CLS
+    1879/     612 :                     ;			Print 8*4 pattern from 0575-0578 (zeros) on screen with DRWR I, Vx, address following subroutine call contains:
+    1880/     612 :                     ; 			byte 1: Vx value
+    1881/     612 :                     ; 			byte 2: Vx+1 value
+    1882/     612 : 66 00               		DB   66H, 00H		 ;   0612: PUSH  V0-V9         
+    1883/     614 : F3 75               		DB   0F3H, 75H		 ;   0614: LD    V3, 75        
+    1884/     616 : 6C 00               		DB   6CH, 00H		 ;   0616: POP   I             
+    1885/     618 : 50 D1               		DB   50H, 0D1H		 ;   0618: CP    [I], V0, V1   
+    1886/     61A : 62 02               		DB   62H, 02H		 ;   061A: ADD   I, 02         
+    1887/     61C : 6A 00               		DB   6AH, 00H		 ;   061C: PUSH  I             
+    1888/     61E : 05 00               		DB   05H, 00H		 ;   061E: LD    I, 0500       
+    1889/     620 : D3 F7               		DB   0D3H, 0F7H		 ;   0620: LD    [27F7], V3    
+    1890/     622 : 50 70               		DB   50H, 70H		 ;   0622: DRWR  I, V0         
+    1891/     624 : 65 0C               		DB   65H, 0CH		 ;   0624: JP    0C            
+    1892/     626 :                     		
+    1893/     626 :                     ; 0626-062B SCR FILL
+    1894/     626 :                     ;			Print 8*4 pattern from 05FC-05FF (#ff) on screen with DRWR I, Vx, address following subroutine call contains:
+    1895/     626 :                     ; 			byte 1: Vx value
+    1896/     626 :                     ; 			byte 2: Vx+1 value
+    1897/     626 : 66 00               		DB   66H, 00H		 ;   0626: PUSH  V0-V9         
+    1898/     628 : F3 FC               		DB   0F3H, 0FCH		 ;   0628: LD    V3, FC        
+    1899/     62A : 65 16               		DB   65H, 16H		 ;   062A: JP    16            
+    1900/     62C :                     		
+    1901/     62C :                     ; 062C-0647 CHAR [I], V0, V1 or CHAR [I]
+    1902/     62C :                     ;			Print character on [I] using screen position horizontal V0, vertical V1
+    1903/     62C : 64 E2               		DB   64H, 0E2H		 ;   062C: LD    V2, V3, I     
+    1904/     62E :                     		
+    1905/     62E :                     ; 062E-0647 CHAR [V2V3], V0, V1 or CHAR [V2V3]
+    1906/     62E :                     ;			Print character on [V2V3] on screen position horizontal V0, vertical V1
+    1907/     62E : 56 F2               		DB   56H, 0F2H		 ;   062E: LD    V6, [V2]      
+    1908/     630 : 73 01               		DB   73H, 01H		 ;   0630: ADD   V3, 01        
+    1909/     632 : 06 3A               		DB   06H, 3AH		 ;   0632: LD    I, 063A       
+    1910/     634 : B6 FF               		DB   0B6H, 0FFH		 ;   0634: JNE   I, V6, FF     
+    1911/     636 : 63 E2               		DB   63H, 0E2H		 ;   0636: LD    I, V2, V3     
+    1912/     638 : 6B 00               		DB   6BH, 00H		 ;   0638: RET                 
+    1913/     63A : 05 00               		DB   05H, 00H		 ;   063A: LD    I, 0500       
+    1914/     63C : D6 F7               		DB   0D6H, 0F7H		 ;   063C: LD    [27F7], V6    
+    1915/     63E : 56 D6               		DB   56H, 0D6H		 ;   063E: CP    [I], V6, V6   
+    1916/     640 : D6 F7               		DB   0D6H, 0F7H		 ;   0640: LD    [27F7], V6    
+    1917/     642 : 40 E5               		DB   40H, 0E5H		 ;   0642: DRW   I, V0, 5      
+    1918/     644 : 70 06               		DB   70H, 06H		 ;   0644: ADD   V0, 06        
+    1919/     646 : 65 2E               		DB   65H, 2EH		 ;   0646: JP    2E            
+    1920/     648 :                     		
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 33 - 24/08/19 19:51:57
+
+
+    1921/     648 :                     ; 0648-0655 PRINT
+    1922/     648 :                     ;			Print characters on screen, address following subroutine call contains:
+    1923/     648 :                     ; 			byte 1: horizontal position on screen (0 to 128)
+    1924/     648 :                     ; 			byte 2: vertical position on screen (0 to 64)
+    1925/     648 :                     ; 			byte 3 and onwards: character number as on 05nn see 0500-052F table.
+    1926/     648 :                     ;			last byte 0xFF
+    1927/     648 : 6C 00               		DB   6CH, 00H		 ;   0648: POP   I             
+    1928/     64A : 66 00               		DB   66H, 00H		 ;   064A: PUSH  V0-V9         
+    1929/     64C : 50 D1               		DB   50H, 0D1H		 ;   064C: CP    [I], V0, V1   
+    1930/     64E : 62 02               		DB   62H, 02H		 ;   064E: ADD   I, 02         
+    1931/     650 : 66 2C               		DB   66H, 2CH		 ;   0650: CHAR  [I], V0, V1   
+    1932/     652 : 6A 00               		DB   6AH, 00H		 ;   0652: PUSH  I             
+    1933/     654 : 65 0A               		DB   65H, 0AH		 ;   0654: JP    0A            
+    1934/     656 :                     		
+    1935/     656 :                     ; 0656-065F PRINT [I]
+    1936/     656 :                     ;			Print characters on screen, [I] contains:
+    1937/     656 :                     ; 			byte 1: horizontal position on screen (0 to 128)
+    1938/     656 :                     ; 			byte 2: vertical position on screen (0 to 64)
+    1939/     656 :                     ; 			byte 3 and onwards: character number as on 05nn see 0500-052F table.
+    1940/     656 :                     ;			last byte 0xFF
+    1941/     656 : 66 00               		DB   66H, 00H		 ;   0656: PUSH  V0-V9         
+    1942/     658 : 50 D1               		DB   50H, 0D1H		 ;   0658: CP    [I], V0, V1   
+    1943/     65A : 62 02               		DB   62H, 02H		 ;   065A: ADD   I, 02         
+    1944/     65C : 66 2C               		DB   66H, 2CH		 ;   065C: CHAR  [I], V0, V1   
+    1945/     65E : 65 0A               		DB   65H, 0AH		 ;   065E: JP    0A            
+    1946/     660 :                     		
+    1947/     660 :                     ; 0660-067B PRINT D, 3
+    1948/     660 :                     ;			Print decimal value of V9 (3 digits) on screen, address following subroutine call contains:
+    1949/     660 :                     ; 			byte 1: horizontal position on screen (0 to 128)
+    1950/     660 :                     ; 			byte 2: vertical position on screen (0 to 64)
+    1951/     660 : 66 00               		DB   66H, 00H		 ;   0660: PUSH  V0-V9         
+    1952/     662 : F8 0C               		DB   0F8H, 0CH		 ;   0662: LD    V8, 0C        
+    1953/     664 : 6C 00               		DB   6CH, 00H		 ;   0664: POP   I             
+    1954/     666 : 50 D1               		DB   50H, 0D1H		 ;   0666: CP    [I], V0, V1   
+    1955/     668 : 62 02               		DB   62H, 02H		 ;   0668: ADD   I, 02         
+    1956/     66A : 6A 00               		DB   6AH, 00H		 ;   066A: PUSH  I             
+    1957/     66C : F2 27               		DB   0F2H, 27H		 ;   066C: LD    V2, 27        
+    1958/     66E : F3 0C               		DB   0F3H, 0CH		 ;   066E: LD    V3, 0C        
+    1959/     670 : 49 03               		DB   49H, 03H		 ;   0670: LD    B, [V3], V9   
+    1960/     672 : F6 FF               		DB   0F6H, 0FFH		 ;   0672: LD    V6, FF        
+    1961/     674 : D6 0F               		DB   0D6H, 0FH		 ;   0674: LD    [270F], V6    
+    1962/     676 : D8 E3               		DB   0D8H, 0E3H		 ;   0676: LD    V3, V8        
+    1963/     678 : 66 2E               		DB   66H, 2EH		 ;   0678: CHAR  [V2V3],V0,V1  
+    1964/     67A : 65 0A               		DB   65H, 0AH		 ;   067A: JP    0A            
+    1965/     67C :                     		
+    1966/     67C :                     ; 067C-0681 PRINT D, 2
+    1967/     67C :                     ;			Print decimal value of V9 (2 digits) on screen, address following subroutine call contains:
+    1968/     67C :                     ; 			byte 1: horizontal position on screen (0 to 128)
+    1969/     67C :                     ; 			byte 2: vertical position on screen (0 to 64)
+    1970/     67C : 66 00               		DB   66H, 00H		 ;   067C: PUSH  V0-V9         
+    1971/     67E : F8 0D               		DB   0F8H, 0DH		 ;   067E: LD    V8, 0D        
+    1972/     680 : 65 64               		DB   65H, 64H		 ;   0680: JP    64            
+    1973/     682 :                     		
+    1974/     682 :                     ; 0682-0687 PRINT D, 1
+    1975/     682 :                     ;			Print decimal value of V9 (1 digit) on screen, address following subroutine call contains:
+    1976/     682 :                     ; 			byte 1: horizontal position on screen (0 to 128)
+    1977/     682 :                     ; 			byte 2: vertical position on screen (0 to 64)
+    1978/     682 : 66 00               		DB   66H, 00H		 ;   0682: PUSH  V0-V9         
+    1979/     684 : F8 0E               		DB   0F8H, 0EH		 ;   0684: LD    V8, 0E        
+    1980/     686 : 65 64               		DB   65H, 64H		 ;   0686: JP    64 
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 34 - 24/08/19 19:51:57
+
+
+    1981/     688 :                     		
+    1982/     688 :                     ; 0688-0690 CLR
+    1983/     688 :                     ;			Colour 2 blocks on the screen with CLR Vx, Vy, address following subroutine call contains:
+    1984/     688 :                     ; 			byte 1/2: Screen position first CLR command (Vx and Vx+1)
+    1985/     688 :                     ; 			byte 3/4: Screen position second CLR command (Vx and Vx+1)
+    1986/     688 :                     ; 			byte 5: Colour first CLR command (Vy)
+    1987/     688 :                     ; 			byte 6: Colour second CLR command (Vy)
+    1988/     688 :                     ; 			If byte 6 highest nible is not 0 then 2 more blocks in following 6 bytes will be coloured.
+    1989/     688 :                     ;			(Code on 0424-0432 and 04CE-04D1 is part of this routine)
+    1990/     688 : 6C 00               		DB   6CH, 00H		 ;   0688: POP   I             
+    1991/     68A : 66 00               		DB   66H, 00H		 ;   068A: PUSH  V0-V9         
+    1992/     68C : 04 24               		DB   04H, 24H		 ;   068C: LD    I, 0424       
+    1993/     68E : 4B BB               		DB   4BH, 0BBH		 ;   068E: JP    I   
+    1994/     690 :                     		
+    1995/     690 :                     ; 0690-0699 CP [I]
+    1996/     690 :                     ;			Copy to [I] from memory after subroutine call, number of bytes stored in V9
+    1997/     690 :                     ;			(Code on 04D4-04EB is part of this routine)
+    1998/     690 : 64 0E               		DB   64H, 0EH		 ;   0690: LD    [270E], I     
+    1999/     692 : 6C 00               		DB   6CH, 00H		 ;   0692: POP   I             
+    2000/     694 : 66 00               		DB   66H, 00H		 ;   0694: PUSH  V0-V9         
+    2001/     696 : 04 D4               		DB   04H, 0D4H		 ;   0696: LD    I, 04D4       
+    2002/     698 : 4B BB               		DB   4BH, 0BBH		 ;   0698: JP    I       
+    2003/     69A :                     		
+    2004/     69A :                     ; 069A-06FD Colour / sound demo
+    2005/     69A : 96 A4               		DB   96H, 0A4H		 ;   069A: JNZ   V6, A4        
+    2006/     69C : F6 FF               		DB   0F6H, 0FFH		 ;   069C: LD    V6, FF        
+    2007/     69E : 6F 72               		DB   6FH, 72H		 ;   069E: OUT4  72            
+    2008/     6A0 : 66 26               		DB   66H, 26H		 ;   06A0: SCR   FILL          
+    2009/     6A2 : F0                  		DB   0F0H            ;06A2: F0
+    2010/     6A3 : F0                  		DB   0F0H            ;06A3: F0
+    2011/     6A4 : FA 01               		DB   0FAH, 01H		 ;   06A4: LD    VA, 01        
+    2012/     6A6 : D0 E5               		DB   0D0H, 0E5H		 ;   06A6: LD    V5, V0        
+    2013/     6A8 : 45 64               		DB   45H, 64H		 ;   06A8: SHL   V5, 4         
+    2014/     6AA : DB E4               		DB   0DBH, 0E4H		 ;   06AA: LD    V4, VB        
+    2015/     6AC : 45 94               		DB   45H, 94H		 ;   06AC: SHR   V5, 4         
+    2016/     6AE : 45 44               		DB   45H, 44H		 ;   06AE: ADD   V5, V4        
+    2017/     6B0 : FB 07               		DB   0FBH, 07H		 ;   06B0: LD    VB, 07        
+    2018/     6B2 : 06 D6               		DB   06H, 0D6H		 ;   06B2: LD    I, 06D6       
+    2019/     6B4 : 55 AB               		DB   55H, 0ABH		 ;   06B4: JG    I, V5, VB     
+    2020/     6B6 : D1 E5               		DB   0D1H, 0E5H		 ;   06B6: LD    V5, V1        
+    2021/     6B8 : 45 64               		DB   45H, 64H		 ;   06B8: SHL   V5, 4         
+    2022/     6BA : DB E5               		DB   0DBH, 0E5H		 ;   06BA: LD    V5, VB        
+    2023/     6BC : D0 E2               		DB   0D0H, 0E2H		 ;   06BC: LD    V2, V0        
+    2024/     6BE : D1 E3               		DB   0D1H, 0E3H		 ;   06BE: LD    V3, V1        
+    2025/     6C0 : 52 57               		DB   52H, 57H		 ;   06C0: CLR   V2, V7        
+    2026/     6C2 : 44 A0               		DB   44H, 0A0H		 ;   06C2: ADDN  V4, V0        
+    2027/     6C4 : F2 0F               		DB   0F2H, 0FH		 ;   06C4: LD    V2, 0F        
+    2028/     6C6 : 42 34               		DB   42H, 34H		 ;   06C6: XOR   V2, V4        
+    2029/     6C8 : 52 57               		DB   52H, 57H		 ;   06C8: CLR   V2, V7        
+    2030/     6CA : 45 A1               		DB   45H, 0A1H		 ;   06CA: ADDN  V5, V1        
+    2031/     6CC : F3 0F               		DB   0F3H, 0FH		 ;   06CC: LD    V3, 0F        
+    2032/     6CE : 43 35               		DB   43H, 35H		 ;   06CE: XOR   V3, V5        
+    2033/     6D0 : 52 57               		DB   52H, 57H		 ;   06D0: CLR   V2, V7        
+    2034/     6D2 : D0 E2               		DB   0D0H, 0E2H		 ;   06D2: LD    V2, V0        
+    2035/     6D4 : 52 57               		DB   52H, 57H		 ;   06D4: CLR   V2, V7        
+    2036/     6D6 : 40 48               		DB   40H, 48H		 ;   06D6: ADD   V0, V8        
+    2037/     6D8 : 41 48               		DB   41H, 48H		 ;   06D8: ADD   V1, V8        
+    2038/     6DA : C5 03               		DB   0C5H, 03H		 ;   06DA: RND   V5, 03        
+    2039/     6DC : F7 02               		DB   0F7H, 02H		 ;   06DC: LD    V7, 02        
+    2040/     6DE : 85 E2               		DB   85H, 0E2H		 ;   06DE: JZ    V5, E2        
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 35 - 24/08/19 19:51:57
+
+
+    2041/     6E0 : C7 07               		DB   0C7H, 07H		 ;   06E0: RND   V7, 07        
+    2042/     6E2 : 40 F8               		DB   40H, 0F8H		 ;   06E2: KEY   V8            
+    2043/     6E4 : 8B F6               		DB   8BH, 0F6H		 ;   06E4: JZ    VB, F6        
+    2044/     6E6 : 9D EC               		DB   9DH, 0ECH		 ;   06E6: JNZ   VD, EC        
+    2045/     6E8 : 7C FB               		DB   7CH, 0FBH		 ;   06E8: ADD   VC, FB        
+    2046/     6EA : CD 0C               		DB   0CDH, 0CH		 ;   06EA: RND   VD, 0C        
+    2047/     6EC : 6F 30               		DB   6FH, 30H		 ;   06EC: OUT4  30            
+    2048/     6EE : 48 65               		DB   48H, 65H		 ;   06EE: SHL   V8, 5         
+    2049/     6F0 : FB 11               		DB   0FBH, 11H		 ;   06F0: LD    VB, 11        
+    2050/     6F2 : 48 1B               		DB   48H, 1BH		 ;   06F2: OR    V8, VB        
+    2051/     6F4 : 65 FA               		DB   65H, 0FAH		 ;   06F4: JP    FA            
+    2052/     6F6 : 6F 72               		DB   6FH, 72H		 ;   06F6: OUT4  72            
+    2053/     6F8 : 78 01               		DB   78H, 01H		 ;   06F8: ADD   V8, 01        
+    2054/     6FA : FA 00               		DB   0FAH, 00H		 ;   06FA: LD    VA, 00        
+    2055/     6FC : 6B 00               		DB   6BH, 00H		 ;   06FC: RET                 
+    2056/     6FE : 00                  		DB   00H             ;06FE: 00
+    2057/     6FF : 00                  		DB   00H             ;06FF: 00
+    2058/     700 :                     		
+    2059/     700 :                     ; 0700-070A RESET RAM
+    2060/     700 :                     ;			Reset 2700-279F to 0
+    2061/     700 : F8 A0               		LDI  0A0H            ;0700: F8 A0       
+    2062/     702 : A6                  		PLO  R6              ;0702: A6          
+    2063/     703 :                     R0703
+    2064/     703 : 26                  		DEC  R6              ;0703: 26          
+    2065/     704 : F8 00               		LDI  00H             ;0704: F8 00       
+    2066/     706 : 56                  		STR  R6              ;0706: 56          
+    2067/     707 : 86                  		GLO  R6              ;0707: 86          
+    2068/     708 : 3A 03               		BNZ  R0703           ;0708: 3A 03       
+    2069/     70A : D4                  		SEP  R4              ;070A: D4          
+    2070/     70B :                     		
+    2071/     70B :                     ; 070B-071B SCR XOR
+    2072/     70B :                     ;			XOR Screen memory with 0xFF
+    2073/     70B : F8 20               		LDI  20H             ;070B: F8 20       
+    2074/     70D : BF                  		PHI  RF              ;070D: BF          
+    2075/     70E : F8 00               		LDI  00H             ;070E: F8 00       
+    2076/     710 : AF                  		PLO  RF              ;0710: AF          
+    2077/     711 :                     R0711
+    2078/     711 : 0F                  		LDN  RF              ;0711: 0F          
+    2079/     712 : FB FF               		XRI  0FFH            ;0712: FB FF       
+    2080/     714 : 5F                  		STR  RF              ;0714: 5F          
+    2081/     715 : 1F                  		INC  RF              ;0715: 1F          
+    2082/     716 : 9F                  		GHI  RF              ;0716: 9F          
+    2083/     717 : FF 24               		SMI  24H             ;0717: FF 24       
+    2084/     719 : 3A 11               		BNZ  R0711           ;0719: 3A 11       
+    2085/     71B : D4                  		SEP  R4              ;071B: D4          
+    2086/     71C :                     		
+    2087/     71C :                     ; 071C-0753 KEY SWITCH
+    2088/     71C :                     ;			Key switch subroutine
+    2089/     71C :                     ; 			Following bytes are used as input:
+    2090/     71C :                     ; 			byte 1: First key
+    2091/     71C :                     ; 			byte 2: Last key
+    2092/     71C :                     ; 			byte 3/4: return address if no key pressed
+    2093/     71C :                     ; 			following bytes contain jump table for the pressed keys, first two byte key 0, next 2 key 1 etc. 
+    2094/     71C : 6C 00               		DB   6CH, 00H		 ;   071C: POP   I             
+    2095/     71E : 52 D3               		DB   52H, 0D3H		 ;   071E: CP    [I], V2, V3   
+    2096/     720 : 62 02               		DB   62H, 02H		 ;   0720: ADD   I, 02         
+    2097/     722 : 6A 00               		DB   6AH, 00H		 ;   0722: PUSH  I             
+    2098/     724 : D2 E4               		DB   0D2H, 0E4H		 ;   0724: LD    V4, V2        
+    2099/     726 : 07 32               		DB   07H, 32H		 ;   0726: LD    I, 0732       
+    2100/     728 : 50 82               		DB   50H, 82H		 ;   0728: JK    I, V2         
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 36 - 24/08/19 19:51:57
+
+
+    2101/     72A : 72 01               		DB   72H, 01H		 ;   072A: ADD   V2, 01        
+    2102/     72C : 07 50               		DB   07H, 50H		 ;   072C: LD    I, 0750       
+    2103/     72E : 52 A3               		DB   52H, 0A3H		 ;   072E: JG    I, V2, V3     
+    2104/     730 : 65 26               		DB   65H, 26H		 ;   0730: JP    26            
+    2105/     732 : FD 02               		DB   0FDH, 02H		 ;   0732: LD    VD, 02        
+    2106/     734 : 9D 34               		DB   9DH, 34H		 ;   0734: JNZ   VD, 34        
+    2107/     736 : 07 36               		DB   07H, 36H		 ;   0736: LD    I, 0736       
+    2108/     738 : 50 82               		DB   50H, 82H		 ;   0738: JK    I, V2         
+    2109/     73A : FD 02               		DB   0FDH, 02H		 ;   073A: LD    VD, 02        
+    2110/     73C : 9D 3C               		DB   9DH, 3CH		 ;   073C: JNZ   VD, 3C        
+    2111/     73E : 42 54               		DB   42H, 54H		 ;   073E: SUB   V2, V4        
+    2112/     740 : 6C 00               		DB   6CH, 00H		 ;   0740: POP   I             
+    2113/     742 : 62 02               		DB   62H, 02H		 ;   0742: ADD   I, 02         
+    2114/     744 : 82 4A               		DB   82H, 4AH		 ;   0744: JZ    V2, 4A        
+    2115/     746 : 72 FF               		DB   72H, 0FFH		 ;   0746: ADD   V2, FF        
+    2116/     748 : 65 42               		DB   65H, 42H		 ;   0748: JP    42            
+    2117/     74A : 52 D3               		DB   52H, 0D3H		 ;   074A: CP    [I], V2, V3   
+    2118/     74C : 63 E2               		DB   63H, 0E2H		 ;   074C: LD    I, V2, V3     
+    2119/     74E : 4B BB               		DB   4BH, 0BBH		 ;   074E: JP    I             
+    2120/     750 : 6C 00               		DB   6CH, 00H		 ;   0750: POP   I             
+    2121/     752 : 65 4A               		DB   65H, 4AH		 ;   0752: JP    4A            
+    2122/     754 :                     		
+    2123/     754 :                     ; 0754-078D ADD [V0V1], [V2V3] or ADD V0V1, V2V3
+    2124/     754 :                     ;			Add decimal values [V0V1] and [V2V3] store result on [V0V1]
+    2125/     754 :                     ;			Number of digits stored in V9. 
+    2126/     754 :                     ;			LSD is on V0V1 and V2V3, following digit is on one address lower
+    2127/     754 :                     ; 			Each address (byte) only contains one decimal digit
+    2128/     754 : 66 00               		DB   66H, 00H		 ;   0754: PUSH  V0-V9         
+    2129/     756 : F5 00               		DB   0F5H, 00H		 ;   0756: LD    V5, 00        
+    2130/     758 : 65 5E               		DB   65H, 5EH		 ;   0758: JP    5E            
+    2131/     75A :                     		
+    2132/     75A :                     ; 075A-078D SUB [V0V1], [V2V3] or SUB V0V1, V2V3
+    2133/     75A :                     ;			Subtract decimal values [V2V3] from [V0V1] store result on [V0V1]
+    2134/     75A :                     ;			Number of digits stored in V9.
+    2135/     75A :                     ;			LSD is on V0V1 and V2V3, following on one address lower
+    2136/     75A :                     ; 			Each address (byte) only contains one decimal digit
+    2137/     75A : 66 00               		DB   66H, 00H		 ;   075A: PUSH  V0-V9         
+    2138/     75C : F5 01               		DB   0F5H, 01H		 ;   075C: LD    V5, 01        
+    2139/     75E : FB 00               		DB   0FBH, 00H		 ;   075E: LD    VB, 00        
+    2140/     760 : 57 F2               		DB   57H, 0F2H		 ;   0760: LD    V7, [V2]      
+    2141/     762 : 56 F0               		DB   56H, 0F0H		 ;   0762: LD    V6, [V0]      
+    2142/     764 : 95 80               		DB   95H, 80H		 ;   0764: JNZ   V5, 80        
+    2143/     766 : 46 4B               		DB   46H, 4BH		 ;   0766: ADD   V6, VB        
+    2144/     768 : 46 47               		DB   46H, 47H		 ;   0768: ADD   V6, V7        
+    2145/     76A : F7 0A               		DB   0F7H, 0AH		 ;   076A: LD    V7, 0A        
+    2146/     76C : 46 57               		DB   46H, 57H		 ;   076C: SUB   V6, V7        
+    2147/     76E : 9B 72               		DB   9BH, 72H		 ;   076E: JNZ   VB, 72        
+    2148/     770 : 76 0A               		DB   76H, 0AH		 ;   0770: ADD   V6, 0A        
+    2149/     772 : 56 E0               		DB   56H, 0E0H		 ;   0772: LD    [V0], V6      
+    2150/     774 : 71 FF               		DB   71H, 0FFH		 ;   0774: ADD   V1, FF        
+    2151/     776 : 73 FF               		DB   73H, 0FFH		 ;   0776: ADD   V3, FF        
+    2152/     778 : 79 FF               		DB   79H, 0FFH		 ;   0778: ADD   V9, FF        
+    2153/     77A : 99 60               		DB   99H, 60H		 ;   077A: JNZ   V9, 60        
+    2154/     77C : 66 0A               		DB   66H, 0AH		 ;   077C: POP   V0-V9         
+    2155/     77E : 6B 00               		DB   6BH, 00H		 ;   077E: RET                 
+    2156/     780 : 46 5B               		DB   46H, 5BH		 ;   0780: SUB   V6, VB        
+    2157/     782 : 46 57               		DB   46H, 57H		 ;   0782: SUB   V6, V7        
+    2158/     784 : F7 0A               		DB   0F7H, 0AH		 ;   0784: LD    V7, 0A        
+    2159/     786 : 46 47               		DB   46H, 47H		 ;   0786: ADD   V6, V7        
+    2160/     788 : 9B 72               		DB   9BH, 72H		 ;   0788: JNZ   VB, 72        
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 37 - 24/08/19 19:51:57
+
+
+    2161/     78A : 76 F6               		DB   76H, 0F6H		 ;   078A: ADD   V6, F6        
+    2162/     78C : 65 72               		DB   65H, 72H		 ;   078C: JP    72            
+    2163/     78E :                     		
+    2164/     78E :                     ; 078E-079B ADD I, V9
+    2165/     78E :                     ;			I = I + V9
+    2166/     78E : EB F7               		DB   0EBH, 0F7H		 ;   078E: LD    VB, [27F7]    
+    2167/     790 : 49 4B               		DB   49H, 4BH		 ;   0790: ADD   V9, VB        
+    2168/     792 : D9 F7               		DB   0D9H, 0F7H		 ;   0792: LD    [27F7], V9    
+    2169/     794 : E9 F6               		DB   0E9H, 0F6H		 ;   0794: LD    V9, [27F6]    
+    2170/     796 : 49 4B               		DB   49H, 4BH		 ;   0796: ADD   V9, VB        
+    2171/     798 : D9 F6               		DB   0D9H, 0F6H		 ;   0798: LD    [27F6], V9    
+    2172/     79A : 6B 00               		DB   6BH, 00H		 ;   079A: RET                 
+    2173/     79C :                     		
+    2174/     79C :                     ; 079C-07A9 LD I, [I+V9]
+    2175/     79C :                     ;			I = [I+V9]
+    2176/     79C : 67 8E               		DB   67H, 8EH		 ;   079C: ADD   I, V9         
+    2177/     79E :                     		
+    2178/     79E :                     ; 079E-07A9 LD I, [I]
+    2179/     79E :                     ;			I = [I]
+    2180/     79E : DA EB               		DB   0DAH, 0EBH		 ;   079E: LD    VB, VA        
+    2181/     7A0 : 59 DA               		DB   59H, 0DAH		 ;   07A0: CP    [I], V9, VA   
+    2182/     7A2 : D9 F6               		DB   0D9H, 0F6H		 ;   07A2: LD    [27F6], V9    
+    2183/     7A4 : DA F7               		DB   0DAH, 0F7H		 ;   07A4: LD    [27F7], VA    
+    2184/     7A6 : DB EA               		DB   0DBH, 0EAH		 ;   07A6: LD    VA, VB        
+    2185/     7A8 : 6B 00               		DB   6BH, 00H		 ;   07A8: RET                 
+    2186/     7AA :                     		
+    2187/     7AA :                     ; 07AA-07B5 KEY WAIT
+    2188/     7AA :                     ;			Wait for key from either keypad and return key in V9, VA indicates keypad
+    2189/     7AA : 40 F9               		DB   40H, 0F9H		 ;   07AA: KEY   V9            
+    2190/     7AC : 8B B0               		DB   8BH, 0B0H		 ;   07AC: JZ    VB, B0        
+    2191/     7AE : 6B 00               		DB   6BH, 00H		 ;   07AE: RET                 
+    2192/     7B0 : FB 01               		DB   0FBH, 01H		 ;   07B0: LD    VB, 01        
+    2193/     7B2 : 4A 3B               		DB   4AH, 3BH		 ;   07B2: XOR   VA, VB        
+    2194/     7B4 : 65 AA               		DB   65H, 0AAH		 ;   07B4: JP    AA            
+    2195/     7B6 :                     		
+    2196/     7B6 :                     ; 07B6-07CF RND [270B], V9
+    2197/     7B6 :                     ;			RND V9
+    2198/     7B6 :                     ;			Store random number between 0 and V9 on [270B]
+    2199/     7B6 : 66 00               		DB   66H, 00H		 ;   07B6: PUSH  V0-V9         
+    2200/     7B8 : F8 00               		DB   0F8H, 00H		 ;   07B8: LD    V8, 00        
+    2201/     7BA : 65 BE               		DB   65H, 0BEH		 ;   07BA: JP    BE      
+    2202/     7BC :                     		
+    2203/     7BC :                     ; 07BC-07CF RND [270B], V8, V9
+    2204/     7BC :                     ; 			RND V8, V9
+    2205/     7BC :                     ;			Store random number between V8 and V9 on [270B]
+    2206/     7BC : 66 00               		DB   66H, 00H		 ;   07BC: PUSH  V0-V9         
+    2207/     7BE : C7 FF               		DB   0C7H, 0FFH		 ;   07BE: RND   V7, FF        
+    2208/     7C0 : 07 CA               		DB   07H, 0CAH		 ;   07C0: LD    I, 07CA       
+    2209/     7C2 : 57 A9               		DB   57H, 0A9H		 ;   07C2: JG    I, V7, V9     
+    2210/     7C4 : 47 48               		DB   47H, 48H		 ;   07C4: ADD   V7, V8        
+    2211/     7C6 : D7 0B               		DB   0D7H, 0BH		 ;   07C6: LD    [270B], V7    
+    2212/     7C8 : 65 7C               		DB   65H, 7CH		 ;   07C8: JP    7C            
+    2213/     7CA : 47 59               		DB   47H, 59H		 ;   07CA: SUB   V7, V9        
+    2214/     7CC : 77 FF               		DB   77H, 0FFH		 ;   07CC: ADD   V7, FF        
+    2215/     7CE : 65 C0               		DB   65H, 0C0H		 ;   07CE: JP    C0            
+    2216/     7D0 : 00                  		DB   00H             ;07D0: 00
+    2217/     7D1 : 00                  		DB   00H             ;07D1: 00
+    2218/     7D2 : FF                  		DB   0FFH            ;07D2: FF
+    2219/     7D3 : FF                  		DB   0FFH            ;07D3: FF
+    2220/     7D4 : 00                  		DB   00H             ;07D4: 00
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 38 - 24/08/19 19:51:57
+
+
+    2221/     7D5 : FF                  		DB   0FFH            ;07D5: FF
+    2222/     7D6 : 01                  		DB   01H             ;07D6: 01
+    2223/     7D7 : FF                  		DB   0FFH            ;07D7: FF
+    2224/     7D8 : FF                  		DB   0FFH            ;07D8: FF
+    2225/     7D9 : 00                  		DB   00H             ;07D9: 00
+    2226/     7DA : 00                  		DB   00H             ;07DA: 00
+    2227/     7DB : 00                  		DB   00H             ;07DB: 00
+    2228/     7DC : 01                  		DB   01H             ;07DC: 01
+    2229/     7DD : 00                  		DB   00H             ;07DD: 00
+    2230/     7DE : FF                  		DB   0FFH            ;07DE: FF
+    2231/     7DF : 01                  		DB   01H             ;07DF: 01
+    2232/     7E0 : 00                  		DB   00H             ;07E0: 00
+    2233/     7E1 : 01                  		DB   01H             ;07E1: 01
+    2234/     7E2 : 01                  		DB   01H             ;07E2: 01
+    2235/     7E3 : 01                  		DB   01H             ;07E3: 01
+    2236/     7E4 : 00                  		DB   00H             ;07E4: 00
+    2237/     7E5 : 00                  		DB   00H             ;07E5: 00
+    2238/     7E6 : 00                  		DB   00H             ;07E6: 00
+    2239/     7E7 : 00                  		DB   00H             ;07E7: 00
+    2240/     7E8 : 00                  		DB   00H             ;07E8: 00
+    2241/     7E9 : 00                  		DB   00H             ;07E9: 00
+    2242/     7EA : 0F                  		DB   0FH             ;07EA: 0F
+    2243/     7EB : 0F                  		DB   0FH             ;07EB: 0F
+    2244/     7EC : 00                  		DB   00H             ;07EC: 00
+    2245/     7ED : 0F                  		DB   0FH             ;07ED: 0F
+    2246/     7EE : 01                  		DB   01H             ;07EE: 01
+    2247/     7EF : 0F                  		DB   0FH             ;07EF: 0F
+    2248/     7F0 : 0F                  		DB   0FH             ;07F0: 0F
+    2249/     7F1 : 00                  		DB   00H             ;07F1: 00
+    2250/     7F2 : 00                  		DB   00H             ;07F2: 00
+    2251/     7F3 : 00                  		DB   00H             ;07F3: 00
+    2252/     7F4 : 01                  		DB   01H             ;07F4: 01
+    2253/     7F5 : 00                  		DB   00H             ;07F5: 00
+    2254/     7F6 : 0F                  		DB   0FH             ;07F6: 0F
+    2255/     7F7 : 01                  		DB   01H             ;07F7: 01
+    2256/     7F8 : 00                  		DB   00H             ;07F8: 00
+    2257/     7F9 : 01                  		DB   01H             ;07F9: 01
+    2258/     7FA : 01                  		DB   01H             ;07FA: 01
+    2259/     7FB : 01                  		DB   01H             ;07FB: 01
+    2260/     7FC : 00                  		DB   00H             ;07FC: 00
+    2261/     7FD : 00                  		DB   00H             ;07FD: 00
+    2262/     7FE : 00                  		DB   00H             ;07FE: 00
+    2263/     7FF : 00                  		DB   00H             ;07FF: 00
+    2264/     800 :                     		END
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 39 - 24/08/19 19:51:57
+
+
+  symbol table (* = unused):
+  ------------------------
+
+*ARCHITECTURE :                                        x86_64-unknown-linux - |
+*BIGENDIAN :                      0 - | *BRANCHEXT :                      0 - |
+*CASESENSITIVE :                  0 - | *CONSTPI :        3.141592653589793 - |
+*DATE :                    24/08/19 - | *FALSE :                          0 - |
+*FULLPMMU :                       1 - | *HAS64 :                          1 - |
+*HASDSP :                         0 - | *HASFPU :                         0 - |
+*HASPMMU :                        0 - | *INEXTMODE :                      0 - |
+*INLWORDMODE :                    0 - | *INMAXMODE :                      0 - |
+*INSRCMODE :                      0 - | *INSUPMODE :                      0 - |
+*LISTON :                         1 - | *MACEXP :                         7 - |
+ MAIN_OPCODE_LOOP :              16 C | *MOMCPU :                      1802 - |
+*MOMCPUNAME :                  1802 - | *NESTMAX :                      100 - |
+*OPCDOE8 :                      289 C | *OPCDOE9 :                      28F C |
+*OPCODE0123 :                   293 C | *OPCODE4 :                      100 C |
+*OPCODE4X0 :                    10B C | *OPCODE4X12345 :                13E C |
+*OPCODE4X6 :                    155 C | *OPCODE4X78 :                   198 C |
+*OPCODE4X9 :                    16D C | *OPCODE4XA :                    128 C |
+*OPCODE4XC :                    18A C |  OPCODE4XD :                    188 C |
+*OPCODE4XE :                    1E0 C | *OPCODE5 :                      300 C |
+*OPCODE6 :                      400 C | *OPCODE7 :                      1DD C |
+*OPCODEC :                      272 C | *OPCODED :                      2D2 C |
+*OPCODEF :                      29E C | *PACKING :                        0 - |
+*PADDING :                        1 - |  R0 :                             0 - |
+ R0047 :                         47 C |  R0048 :                         48 C |
+ R006C :                         6C C |  R007E :                         7E C |
+ R0089 :                         89 C |  R008E :                         8E C |
+ R00F3 :                         F3 C |  R0113 :                        113 C |
+ R0116 :                        116 C |  R0121 :                        121 C |
+ R013A :                        13A C |  R015E :                        15E C |
+ R0162 :                        162 C |  R0176 :                        176 C |
+ R017A :                        17A C |  R019B :                        19B C |
+ R01AE :                        1AE C |  R01B6 :                        1B6 C |
+ R01B9 :                        1B9 C |  R01C3 :                        1C3 C |
+ R01C7 :                        1C7 C |  R01D7 :                        1D7 C |
+ R01FE :                        1FE C |  R0202 :                        202 C |
+ R020B :                        20B C |  R0212 :                        212 C |
+ R0219 :                        219 C |  R021E :                        21E C |
+ R022A :                        22A C |  R0232 :                        232 C |
+ R0243 :                        243 C |  R024E :                        24E C |
+ R025E :                        25E C |  R0262 :                        262 C |
+ R026F :                        26F C |  R028C :                        28C C |
+ R028E :                        28E C |  R02A8 :                        2A8 C |
+ R02AD :                        2AD C |  R02B7 :                        2B7 C |
+ R02BB :                        2BB C |  R02C1 :                        2C1 C |
+ R02C5 :                        2C5 C |  R0310 :                        310 C |
+ R0316 :                        316 C |  R031C :                        31C C |
+ R0332 :                        332 C |  R0336 :                        336 C |
+ R0344 :                        344 C |  R0370 :                        370 C |
+ R0375 :                        375 C |  R038D :                        38D C |
+ R039D :                        39D C |  R03A1 :                        3A1 C |
+ R03B1 :                        3B1 C |  R03B7 :                        3B7 C |
+ R03BA :                        3BA C |  R03BE :                        3BE C |
+ R03D4 :                        3D4 C |  R03DC :                        3DC C |
+ R03E7 :                        3E7 C |  R0413 :                        413 C |
+ R046D :                        46D C |  R04A6 :                        4A6 C |
+ R04BE :                        4BE C |  R04BF :                        4BF C |
+ R04C4 :                        4C4 C |  R0703 :                        703 C |
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 40 - 24/08/19 19:51:57
+
+
+ R0711 :                        711 C |  R1 :                             1 - |
+ R2 :                             2 - |  R3 :                             3 - |
+ R4 :                             4 - |  R5 :                             5 - |
+ R6 :                             6 - |  R7 :                             7 - |
+ R8 :                             8 - |  R9 :                             9 - |
+ RA :                             A - |  RB :                             B - |
+ RC :                             C - |  RD :                             D - |
+ RE :                             E - | *RELAXED :                        0 - |
+*RET_AFTER_OPCODE :              44 C |  RF :                             F - |
+*S004C :                         4C C | *S00F4 :                         F4 C |
+*S014D :                        14D C | *S01D3 :                        1D3 C |
+*S0236 :                        236 C | *S02A2 :                        2A2 C |
+*S02C9 :                        2C9 C | *S0313 :                        313 C |
+*S0319 :                        319 C | *S0323 :                        323 C |
+*S035B :                        35B C | *S0367 :                        367 C |
+*S037A :                        37A C | *S03EB :                        3EB C |
+*S03F1 :                        3F1 C | *TIME :                    19:51:57 - |
+*TRUE :                           1 - | *VERSION :                     142F - |
+
+    149 symbols
+     62 unused symbols
+
+ AS V1.42 Beta [Bld 148] - source file s4rom.asm - page 41 - 24/08/19 19:51:57
+
+
+  codepages:
+  ----------
+
+STANDARD (0 changed characters)
+
+
+0.01 seconds assembly time
+
+   2265 lines source file
+      2 passes
+      0 errors
+      0 warnings
